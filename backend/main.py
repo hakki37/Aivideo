@@ -12,14 +12,8 @@ from fastapi.responses import FileResponse
 from engine import generate_video
 from youtube_uploader import authenticate, upload_video, youtube_status
 
-app = FastAPI(title="Aivideo Local Engine", version="0.5.0")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Aivideo Local Engine", version="0.5.1")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 oauth_running = False
 oauth_error: str | None = None
@@ -38,22 +32,19 @@ def _oauth_worker() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "service": "aivideo-local-engine", "version": "0.5.0"}
+    return {"ok": True, "service": "aivideo-local-engine", "version": "0.5.1"}
 
 
 @app.get("/engines")
 def engines() -> dict:
     return {
         "brain": {"provider": "Ollama", "model": "Qwen3", "local": True},
-        "visual": {
-            "active": ["Pexels multi-scene"],
-            "optional": ["ComfyUI", "Wan", "LTX-Video"],
-            "safety_filter": "blocked visual metadata",
-        },
+        "visual": {"active": ["Pexels multi-scene"], "optional": ["ComfyUI", "Wan", "LTX-Video"], "safety_filter": "blocked visual metadata"},
         "audio": {"active": ["local music file"], "optional": ["ACE-Step", "Piper"]},
         "subtitles": {"active": "styled quote overlay", "optional": "Whisper"},
         "render": ["FFmpeg 1080x1920", "MoneyPrinterTurbo optional"],
         "publisher": "YouTube Data API",
+        "watermark": {"active": "Islamic Horizon", "default": True, "position": "bottom-right"},
         "fallbacks": True,
     }
 
@@ -85,11 +76,12 @@ async def generate(
     template: str = Form("Hayırlı Cumalar"),
     duration: int = Form(30),
     music_enabled: bool = Form(True),
+    watermark_enabled: bool = Form(True),
 ) -> dict:
     if duration not in {15, 30, 60}:
         raise HTTPException(status_code=400, detail="Süre 15, 30 veya 60 saniye olmalı.")
     try:
-        return await asyncio.to_thread(generate_video, topic, template, duration, music_enabled)
+        return await asyncio.to_thread(generate_video, topic, template, duration, music_enabled, watermark_enabled)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -100,6 +92,7 @@ async def generate_and_upload(
     template: str = Form("Hayırlı Cumalar"),
     duration: int = Form(30),
     music_enabled: bool = Form(True),
+    watermark_enabled: bool = Form(True),
     youtube_enabled: bool = Form(True),
     title: str = Form(""),
     description: str = Form(""),
@@ -109,14 +102,12 @@ async def generate_and_upload(
     if duration not in {15, 30, 60}:
         raise HTTPException(status_code=400, detail="Süre 15, 30 veya 60 saniye olmalı.")
     try:
-        result = await asyncio.to_thread(generate_video, topic, template, duration, music_enabled)
+        result = await asyncio.to_thread(generate_video, topic, template, duration, music_enabled, watermark_enabled)
         if not youtube_enabled:
             return result
-
         status = await asyncio.to_thread(youtube_status)
         if not status.get("connected"):
             return {**result, "youtube": {"uploaded": False, "reason": "YouTube hesabı bağlı değil."}}
-
         script = result.get("script", {})
         final_title = (title.strip() or script.get("title") or "Aivideo")[:100]
         final_description = description.strip() or script.get("description", "")
@@ -124,14 +115,7 @@ async def generate_and_upload(
         if isinstance(generated_tags, str):
             generated_tags = [x.strip() for x in generated_tags.split(",") if x.strip()]
         final_tags = [x.strip() for x in tags.split(",") if x.strip()] or generated_tags
-        uploaded = await asyncio.to_thread(
-            upload_video,
-            result["video_path"],
-            final_title,
-            final_description,
-            final_tags,
-            privacy_status,
-        )
+        uploaded = await asyncio.to_thread(upload_video, result["video_path"], final_title, final_description, final_tags, privacy_status)
         return {**result, "youtube": {"uploaded": True, **uploaded}}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -161,7 +145,6 @@ async def youtube_upload(
         raise HTTPException(status_code=401, detail="YouTube hesabı bağlı değil. Önce /youtube/auth çalıştır.")
     if not (video.filename or "").lower().endswith(".mp4"):
         raise HTTPException(status_code=400, detail="Sadece MP4 video yüklenebilir.")
-
     tags_list = [item.strip() for item in tags.split(",") if item.strip()]
     temp_path: Path | None = None
     try:
