@@ -48,19 +48,8 @@ Yalnızca JSON döndür. Alanlar: quote, title, description, tags, visual_querie
 visual_queries 3 ila 5 adet İngilizce kısa stok video araması olsun; doğal manzara, gökyüzü, yağmur, kitap, ışık, insan silüeti gibi sinematik ve nötr görüntüler seç. Kilise, haç, katedral, İsa veya Hristiyan sembolleri isteme.
 quote kısa, güçlü ve ekrana uygun olsun. Ayet/hadis ise kaynak uydurma; emin değilsen kaynak iddiası yapma.
 description YouTube için doğal Türkçe açıklama, tags virgülle ayrılmış etiket listesi olsun."""
-    payload = json.dumps({
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.65},
-    }).encode("utf-8")
-    result = _http_json(
-        f"{OLLAMA_URL.rstrip('/')}/api/generate",
-        method="POST",
-        headers={"Content-Type": "application/json"},
-        data=payload,
-    )
+    payload = json.dumps({"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json", "options": {"temperature": 0.65}}).encode("utf-8")
+    result = _http_json(f"{OLLAMA_URL.rstrip('/')}/api/generate", method="POST", headers={"Content-Type": "application/json"}, data=payload)
     text = result.get("response", "{}").strip()
     try:
         data = json.loads(text)
@@ -86,12 +75,7 @@ def _pexels_candidates(query: str) -> list[tuple[float, int, str]]:
     if not PEXELS_API_KEY:
         raise RuntimeError("PEXELS_API_KEY ayarlı değil.")
     safe_query = _safe_query(query)
-    url = "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({
-        "query": safe_query,
-        "orientation": "portrait",
-        "size": "medium",
-        "per_page": 20,
-    })
+    url = "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({"query": safe_query, "orientation": "portrait", "size": "medium", "per_page": 20})
     data = _http_json(url, headers={"Authorization": PEXELS_API_KEY})
     candidates: list[tuple[float, int, str]] = []
     for video in data.get("videos", []):
@@ -135,11 +119,7 @@ def _ffmpeg() -> str:
 
 
 def _normalize_clip(source: Path, destination: Path, seconds: float) -> None:
-    vf = (
-        "scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,fps=30,eq=contrast=1.03:saturation=1.05:brightness=0.01,"
-        "zoompan=z='min(zoom+0.0006,1.07)':d=1:s=1080x1920:fps=30"
-    )
+    vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,eq=contrast=1.03:saturation=1.05:brightness=0.01,zoompan=z='min(zoom+0.0006,1.07)':d=1:s=1080x1920:fps=30"
     command = [_ffmpeg(), "-y", "-i", str(source), "-t", f"{seconds:.2f}", "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p", str(destination)]
     subprocess.run(command, check=True, capture_output=True, text=True)
 
@@ -180,26 +160,30 @@ def render_short(source: Path, output: Path, quote: str, duration: int, template
     base_vf = f"{draw},{header},{footer}"
 
     inputs = ["-i", str(source)]
-    filter_complex: list[str] = []
-    video_map = "0:v:0"
-    if watermark_enabled and WATERMARK_FILE.exists():
+    use_watermark = watermark_enabled and WATERMARK_FILE.exists()
+    if use_watermark:
         inputs += ["-loop", "1", "-i", str(WATERMARK_FILE)]
         opacity = max(0.0, min(1.0, WATERMARK_OPACITY))
         width = max(80, min(500, WATERMARK_WIDTH))
-        filter_complex.append(f"[0:v]{base_vf}[base];[1:v]scale={width}:-1,format=rgba,colorchannelmixer=aa={opacity:.3f}[wm];[base][wm]overlay=x=W-w-55:y=H-h-205:format=auto[vout]")
-        video_map = "[vout]"
+        video_filter = f"[0:v]{base_vf}[base];[1:v]scale={width}:-1,format=rgba,colorchannelmixer=aa={opacity:.3f}[wm];[base][wm]overlay=x=W-w-55:y=H-h-205:format=auto[vout]"
+        watermark_input_index = 1
     else:
-        filter_complex.append(f"[0:v]{base_vf}[vout]")
-        video_map = "[vout]"
+        video_filter = f"[0:v]{base_vf}[vout]"
+        watermark_input_index = -1
 
-    audio_args: list[str] = []
     if music_enabled and MUSIC_FILE.exists():
+        music_index = watermark_input_index + 1 if use_watermark else 1
         inputs += ["-stream_loop", "-1", "-i", str(MUSIC_FILE)]
-        audio_args = ["-map", video_map, "-map", "2:a:0" if watermark_enabled and WATERMARK_FILE.exists() else "1:a:0", "-c:a", "aac", "-b:a", "128k", "-af", "volume=0.20", "-shortest"]
+        audio_args = ["-map", f"{music_index}:a:0", "-c:a", "aac", "-b:a", "128k", "-af", "volume=0.20", "-shortest"]
     else:
-        audio_args = ["-map", video_map, "-an"]
+        audio_args = ["-an"]
 
-    command = [_ffmpeg(), "-y", *inputs, "-t", str(duration), "-filter_complex", ";".join(filter_complex), "-map", video_map, "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p", *audio_args[2:] if audio_args[:2] == ["-map", video_map] else *audio_args, "-movflags", "+faststart", str(output)]
+    command = [
+        _ffmpeg(), "-y", *inputs, "-t", str(duration),
+        "-filter_complex", video_filter, "-map", "[vout]",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p",
+        *audio_args, "-movflags", "+faststart", str(output),
+    ]
     subprocess.run(command, check=True, capture_output=True, text=True)
     return output
 
