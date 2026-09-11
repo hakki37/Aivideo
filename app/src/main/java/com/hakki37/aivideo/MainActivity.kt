@@ -84,7 +84,7 @@ fun AivideoApp() {
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("Dua", "İslami Söz").forEach { item ->
+                    listOf("Dua", "İslami Söz", "Normal Söz").forEach { item ->
                         FilterChip(selected = selected == item, onClick = { selected = item }, label = { Text(item) })
                     }
                 }
