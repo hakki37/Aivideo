@@ -33,6 +33,7 @@ class MainActivity : ComponentActivity() {
         topic: String,
         template: String,
         duration: String,
+        musicEnabled: Boolean,
         youtube: Boolean,
         title: String,
         description: String,
@@ -52,6 +53,7 @@ class MainActivity : ComponentActivity() {
                     "topic" to topic,
                     "template" to template,
                     "duration" to seconds,
+                    "music_enabled" to musicEnabled.toString(),
                     "youtube_enabled" to youtube.toString(),
                     "title" to title,
                     "description" to description,
@@ -73,6 +75,7 @@ class MainActivity : ComponentActivity() {
                 val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
                 val message = if (connection.responseCode in 200..299) {
                     if (response.contains("\"uploaded\":true")) "Video hazırlandı ve YouTube'a yüklendi."
+                    else if (response.contains("\"music_enabled\":true")) "Video hazırlandı • müzik eklendi."
                     else "Video başarıyla oluşturuldu."
                 } else {
                     "Motor hatası (${connection.responseCode}): ${response.take(220)}"
@@ -159,7 +162,7 @@ class MainActivity : ComponentActivity() {
                             }
                             HorizontalDivider()
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-                                Column { Text("Arka plan müziği"); Text("İlahi / ney tarzı", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                                Column { Text("Arka plan müziği"); Text("Yerel müzik / ACE-Step hazırsa kullan", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                                 Switch(checked = musicEnabled, onCheckedChange = { musicEnabled = it })
                             }
                         }
@@ -190,7 +193,7 @@ class MainActivity : ComponentActivity() {
                     Card(shape = RoundedCornerShape(20.dp)) {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("PC AI Motoru", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                            Text("Ollama + Pexels + FFmpeg + YouTube", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text("Qwen3 + çoklu Pexels sahne + FFmpeg + YouTube", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             OutlinedTextField(
                                 value = backendUrl, onValueChange = { backendUrl = it }, modifier = Modifier.fillMaxWidth(),
                                 label = { Text("Motor adresi") }, placeholder = { Text("http://PC-IP:8000") },
@@ -207,8 +210,8 @@ class MainActivity : ComponentActivity() {
                         enabled = !busy,
                         onClick = {
                             busy = true
-                            statusMessage = "AI motoru çalışıyor… Qwen3 içerik hazırlıyor, video render ediliyor."
-                            runEngine(backendUrl, topic, selected, duration, youtubeEnabled, title, description, tags, privacy) { result ->
+                            statusMessage = "AI motoru çalışıyor… Qwen3 sahneleri planlıyor, görüntüler seçiliyor ve Shorts render ediliyor."
+                            runEngine(backendUrl, topic, selected, duration, musicEnabled, youtubeEnabled, title, description, tags, privacy) { result ->
                                 busy = false
                                 statusMessage = result
                                 Toast.makeText(this@MainActivity, result, Toast.LENGTH_LONG).show()
