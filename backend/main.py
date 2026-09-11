@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from engine import generate_video
 from youtube_uploader import authenticate, upload_video, youtube_status
 
-app = FastAPI(title="Aivideo Local Engine", version="0.3.0")
+app = FastAPI(title="Aivideo Local Engine", version="0.4.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,18 +38,18 @@ def _oauth_worker() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "service": "aivideo-local-engine", "version": "0.3.0"}
+    return {"ok": True, "service": "aivideo-local-engine", "version": "0.4.0"}
 
 
 @app.get("/engines")
 def engines() -> dict:
     return {
         "brain": "Ollama / Qwen3",
-        "visual": ["Pexels", "ComfyUI (optional)", "Wan/LTX (optional)"],
-        "audio": ["ACE-Step (optional)", "Piper (optional)"],
+        "visual": ["Pexels multi-scene", "ComfyUI (optional)", "Wan/LTX (optional)"],
+        "audio": ["local music / ACE-Step (optional)", "Piper (optional)"],
         "subtitles": "Whisper (optional)",
         "render": ["FFmpeg", "MoneyPrinterTurbo (optional)"],
-        "quality_control": ["metadata filtering", "Vision/CLIP (optional)"],
+        "quality_control": ["blocked visual metadata filtering", "Vision/CLIP (optional)"],
         "publisher": "YouTube Data API",
     }
 
@@ -80,11 +80,12 @@ async def generate(
     topic: str = Form(""),
     template: str = Form("Hayırlı Cumalar"),
     duration: int = Form(30),
+    music_enabled: bool = Form(True),
 ) -> dict:
     if duration not in {15, 30, 60}:
         raise HTTPException(status_code=400, detail="Süre 15, 30 veya 60 saniye olmalı.")
     try:
-        return await asyncio.to_thread(generate_video, topic, template, duration)
+        return await asyncio.to_thread(generate_video, topic, template, duration, music_enabled)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -94,6 +95,7 @@ async def generate_and_upload(
     topic: str = Form(""),
     template: str = Form("Hayırlı Cumalar"),
     duration: int = Form(30),
+    music_enabled: bool = Form(True),
     youtube_enabled: bool = Form(True),
     title: str = Form(""),
     description: str = Form(""),
@@ -103,7 +105,7 @@ async def generate_and_upload(
     if duration not in {15, 30, 60}:
         raise HTTPException(status_code=400, detail="Süre 15, 30 veya 60 saniye olmalı.")
     try:
-        result = await asyncio.to_thread(generate_video, topic, template, duration)
+        result = await asyncio.to_thread(generate_video, topic, template, duration, music_enabled)
         if not youtube_enabled:
             return result
 
