@@ -19,6 +19,9 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 MUSIC_FILE = Path(os.getenv("AIVIDEO_MUSIC_FILE", str(ASSETS_DIR / "music.mp3")))
+WATERMARK_FILE = Path(os.getenv("AIVIDEO_WATERMARK_FILE", str(ASSETS_DIR / "islamic_horizon_watermark.png")))
+WATERMARK_OPACITY = float(os.getenv("AIVIDEO_WATERMARK_OPACITY", "0.65"))
+WATERMARK_WIDTH = int(os.getenv("AIVIDEO_WATERMARK_WIDTH", "220"))
 
 BLOCKED_VISUAL_WORDS = (
     "church", "cross", "cathedral", "christian", "chapel", "crucifix", "jesus",
@@ -117,9 +120,8 @@ def pexels_video(query: str, destination: Path) -> Path:
             break
     if not all_candidates:
         raise RuntimeError(f"Uygun portre Pexels videosu bulunamadı: {_safe_query(query)}")
-    # Prefer the closest 9:16 source, then higher resolution.
     all_candidates.sort(key=lambda x: (x[0], x[1]))
-    request = urllib.request.Request(all_candidates[0][2], headers={"User-Agent": "Aivideo/0.4"})
+    request = urllib.request.Request(all_candidates[0][2], headers={"User-Agent": "Aivideo/0.5"})
     with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
         shutil.copyfileobj(response, output)
     return destination
@@ -135,26 +137,17 @@ def _ffmpeg() -> str:
 def _normalize_clip(source: Path, destination: Path, seconds: float) -> None:
     vf = (
         "scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,"
-        "fps=30,"
-        "eq=contrast=1.03:saturation=1.05:brightness=0.01,"
+        "crop=1080:1920,fps=30,eq=contrast=1.03:saturation=1.05:brightness=0.01,"
         "zoompan=z='min(zoom+0.0006,1.07)':d=1:s=1080x1920:fps=30"
     )
-    command = [
-        _ffmpeg(), "-y", "-i", str(source), "-t", f"{seconds:.2f}",
-        "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
-        "-pix_fmt", "yuv420p", str(destination),
-    ]
+    command = [_ffmpeg(), "-y", "-i", str(source), "-t", f"{seconds:.2f}", "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p", str(destination)]
     subprocess.run(command, check=True, capture_output=True, text=True)
 
 
 def _concat_clips(clips: list[Path], output: Path) -> None:
     list_file = OUTPUT_DIR / "concat.txt"
     list_file.write_text("\n".join(f"file '{p.as_posix()}'" for p in clips), encoding="utf-8")
-    command = [
-        _ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
-        "-c", "copy", "-movflags", "+faststart", str(output),
-    ]
+    command = [_ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", "-movflags", "+faststart", str(output)]
     subprocess.run(command, check=True, capture_output=True, text=True)
 
 
@@ -174,47 +167,44 @@ def _wrap_quote(text: str, max_chars: int = 30) -> str:
     return "\\n".join(lines[:6])
 
 
-def render_short(source: Path, output: Path, quote: str, duration: int, template: str, music_enabled: bool) -> Path:
+def render_short(source: Path, output: Path, quote: str, duration: int, template: str, music_enabled: bool, watermark_enabled: bool = True) -> Path:
     safe = re.sub(r"[^\w\u0080-\uFFFF .,!?;:'’()\-]", "", quote).strip()[:220]
     safe = _wrap_quote(safe)
     escaped = safe.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     template_text = template.upper().replace("'", "")[:24]
     footer_text = "🌙 HAYIRLI CUMALAR 🤲" if template == "Hayırlı Cumalar" else "AIVIDEO • İSLAMİ SHORTS"
     font = "/Windows/Fonts/arial.ttf" if os.name == "nt" else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-    draw = (
-        f"drawtext=fontfile='{font}':text='{escaped}':fontcolor=white:fontsize=66:"
-        "x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=16:box=1:boxcolor=black@0.38:boxborderw=42:"
-        f"alpha='if(lt(t,0.7),t/0.7,if(gt(t,{duration}-0.7),({duration}-t)/0.7,1))'"
-    )
-    header = (
-        f"drawtext=fontfile='{font}':text='{template_text}':fontcolor=white@0.72:fontsize=30:"
-        "x=(w-text_w)/2:y=90"
-    )
-    footer = (
-        f"drawtext=fontfile='{font}':text='{footer_text}':fontcolor=white:fontsize=34:"
-        "x=(w-text_w)/2:y=h-150:box=1:boxcolor=black@0.30:boxborderw=18"
-    )
-    vf = f"{draw},{header},{footer}"
+    draw = f"drawtext=fontfile='{font}':text='{escaped}':fontcolor=white:fontsize=66:x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=16:box=1:boxcolor=black@0.38:boxborderw=42:alpha='if(lt(t,0.7),t/0.7,if(gt(t,{duration}-0.7),({duration}-t)/0.7,1))'"
+    header = f"drawtext=fontfile='{font}':text='{template_text}':fontcolor=white@0.72:fontsize=30:x=(w-text_w)/2:y=90"
+    footer = f"drawtext=fontfile='{font}':text='{footer_text}':fontcolor=white:fontsize=34:x=(w-text_w)/2:y=h-150:box=1:boxcolor=black@0.30:boxborderw=18"
+    base_vf = f"{draw},{header},{footer}"
+
     inputs = ["-i", str(source)]
+    filter_complex: list[str] = []
+    video_map = "0:v:0"
+    if watermark_enabled and WATERMARK_FILE.exists():
+        inputs += ["-loop", "1", "-i", str(WATERMARK_FILE)]
+        opacity = max(0.0, min(1.0, WATERMARK_OPACITY))
+        width = max(80, min(500, WATERMARK_WIDTH))
+        filter_complex.append(f"[0:v]{base_vf}[base];[1:v]scale={width}:-1,format=rgba,colorchannelmixer=aa={opacity:.3f}[wm];[base][wm]overlay=x=W-w-55:y=H-h-205:format=auto[vout]")
+        video_map = "[vout]"
+    else:
+        filter_complex.append(f"[0:v]{base_vf}[vout]")
+        video_map = "[vout]"
+
     audio_args: list[str] = []
     if music_enabled and MUSIC_FILE.exists():
         inputs += ["-stream_loop", "-1", "-i", str(MUSIC_FILE)]
-        audio_args = [
-            "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "128k",
-            "-af", "volume=0.20", "-shortest",
-        ]
+        audio_args = ["-map", video_map, "-map", "2:a:0" if watermark_enabled and WATERMARK_FILE.exists() else "1:a:0", "-c:a", "aac", "-b:a", "128k", "-af", "volume=0.20", "-shortest"]
     else:
-        audio_args = ["-an"]
-    command = [
-        _ffmpeg(), "-y", *inputs, "-t", str(duration), "-vf", vf,
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p",
-        *audio_args, "-movflags", "+faststart", str(output),
-    ]
+        audio_args = ["-map", video_map, "-an"]
+
+    command = [_ffmpeg(), "-y", *inputs, "-t", str(duration), "-filter_complex", ";".join(filter_complex), "-map", video_map, "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p", *audio_args[2:] if audio_args[:2] == ["-map", video_map] else *audio_args, "-movflags", "+faststart", str(output)]
     subprocess.run(command, check=True, capture_output=True, text=True)
     return output
 
 
-def generate_video(topic: str, template: str, duration: int, music_enabled: bool = True) -> dict:
+def generate_video(topic: str, template: str, duration: int, music_enabled: bool = True, watermark_enabled: bool = True) -> dict:
     script = ollama_generate(topic, template, duration)
     queries = script["visual_queries"]
     scene_count = min(len(queries), max(3, duration // 10))
@@ -232,12 +222,13 @@ def generate_video(topic: str, template: str, duration: int, music_enabled: bool
     montage = OUTPUT_DIR / "montage.mp4"
     _concat_clips(normalized_clips, montage)
     output = OUTPUT_DIR / "aivideo_short.mp4"
-    render_short(montage, output, script.get("quote", "Hayra vesile olan bir söz."), duration, template, music_enabled)
+    render_short(montage, output, script.get("quote", "Hayra vesile olan bir söz."), duration, template, music_enabled, watermark_enabled)
     return {
         "ok": True,
         "video_path": str(output),
         "script": script,
         "scenes": used_queries,
         "music_enabled": bool(music_enabled and MUSIC_FILE.exists()),
-        "engine": "ollama+pexels+ffmpeg-multiscene-v2",
+        "watermark_enabled": bool(watermark_enabled and WATERMARK_FILE.exists()),
+        "engine": "ollama+pexels+ffmpeg-multiscene-watermark",
     }
