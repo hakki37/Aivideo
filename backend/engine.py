@@ -21,8 +21,16 @@ PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 MUSIC_FILE = Path(os.getenv("AIVIDEO_MUSIC_FILE", str(ASSETS_DIR / "music.mp3")))
 
 BLOCKED_VISUAL_WORDS = (
-    "church", "cross", "cathedral", "christian", "chapel", "crucifix", "jesus", "bible church"
+    "church", "cross", "cathedral", "christian", "chapel", "crucifix", "jesus",
+    "bible church", "steeple", "altar", "mosque interior"
 )
+FALLBACK_QUERIES = [
+    "peaceful sunrise mountains",
+    "soft clouds golden light",
+    "rain on window cinematic",
+    "calm ocean sunset",
+    "green forest sunlight",
+]
 
 
 def _http_json(url: str, *, method: str = "GET", headers: dict | None = None, data: bytes | None = None) -> dict:
@@ -54,13 +62,13 @@ description YouTube için doğal Türkçe açıklama, tags virgülle ayrılmış
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        data = {"quote": text, "title": topic or "Günün Mesajı", "description": "", "tags": [], "visual_queries": ["peaceful nature sunrise", "soft clouds", "cinematic landscape"]}
+        data = {"quote": text, "title": topic or "Günün Mesajı", "description": "", "tags": [], "visual_queries": FALLBACK_QUERIES[:3]}
     queries = data.get("visual_queries")
     if isinstance(queries, str):
         queries = [queries]
     data["visual_queries"] = [q.strip() for q in (queries or []) if isinstance(q, str) and q.strip()][:5]
     if not data["visual_queries"]:
-        data["visual_queries"] = ["peaceful nature sunrise", "soft clouds", "cinematic landscape"]
+        data["visual_queries"] = FALLBACK_QUERIES[:3]
     return data
 
 
@@ -71,7 +79,7 @@ def _safe_query(query: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip() or "peaceful nature"
 
 
-def pexels_video(query: str, destination: Path) -> Path:
+def _pexels_candidates(query: str) -> list[tuple[float, int, str]]:
     if not PEXELS_API_KEY:
         raise RuntimeError("PEXELS_API_KEY ayarlı değil.")
     safe_query = _safe_query(query)
@@ -79,10 +87,10 @@ def pexels_video(query: str, destination: Path) -> Path:
         "query": safe_query,
         "orientation": "portrait",
         "size": "medium",
-        "per_page": 15,
+        "per_page": 20,
     })
     data = _http_json(url, headers={"Authorization": PEXELS_API_KEY})
-    candidates = []
+    candidates: list[tuple[float, int, str]] = []
     for video in data.get("videos", []):
         blob = json.dumps(video, ensure_ascii=False).lower()
         if any(word in blob for word in BLOCKED_VISUAL_WORDS):
@@ -90,14 +98,28 @@ def pexels_video(query: str, destination: Path) -> Path:
         for item in video.get("video_files", []):
             width, height = item.get("width", 0), item.get("height", 0)
             link = item.get("link")
-            if height >= width and link:
+            if height >= width and width >= 540 and height >= 960 and link:
                 ratio_error = abs((height / max(width, 1)) - 16 / 9)
-                quality = min(width, height)
+                quality = width * height
                 candidates.append((ratio_error, -quality, link))
-    if not candidates:
-        raise RuntimeError(f"Uygun portre Pexels videosu bulunamadı: {safe_query}")
-    candidates.sort(key=lambda x: (x[0], x[1]))
-    request = urllib.request.Request(candidates[0][2], headers={"User-Agent": "Aivideo/0.3"})
+    return candidates
+
+
+def pexels_video(query: str, destination: Path) -> Path:
+    queries = [query] + [q for q in FALLBACK_QUERIES if q.lower() != query.lower()]
+    all_candidates: list[tuple[float, int, str]] = []
+    for candidate_query in queries[:4]:
+        try:
+            all_candidates.extend(_pexels_candidates(candidate_query))
+        except Exception:
+            continue
+        if all_candidates:
+            break
+    if not all_candidates:
+        raise RuntimeError(f"Uygun portre Pexels videosu bulunamadı: {_safe_query(query)}")
+    # Prefer the closest 9:16 source, then higher resolution.
+    all_candidates.sort(key=lambda x: (x[0], x[1]))
+    request = urllib.request.Request(all_candidates[0][2], headers={"User-Agent": "Aivideo/0.4"})
     with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
         shutil.copyfileobj(response, output)
     return destination
@@ -131,7 +153,7 @@ def _concat_clips(clips: list[Path], output: Path) -> None:
     list_file.write_text("\n".join(f"file '{p.as_posix()}'" for p in clips), encoding="utf-8")
     command = [
         _ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
-        "-c", "copy", str(output),
+        "-c", "copy", "-movflags", "+faststart", str(output),
     ]
     subprocess.run(command, check=True, capture_output=True, text=True)
 
@@ -157,34 +179,36 @@ def render_short(source: Path, output: Path, quote: str, duration: int, template
     safe = _wrap_quote(safe)
     escaped = safe.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     template_text = template.upper().replace("'", "")[:24]
-    friday = "🌙 HAYIRLI CUMALAR 🤲" if template == "Hayırlı Cumalar" else "AIVIDEO • İSLAMİ SHORTS"
-    # Use DejaVu on Linux and Arial on Windows; FFmpeg will use whichever exists.
+    footer_text = "🌙 HAYIRLI CUMALAR 🤲" if template == "Hayırlı Cumalar" else "AIVIDEO • İSLAMİ SHORTS"
     font = "/Windows/Fonts/arial.ttf" if os.name == "nt" else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     draw = (
         f"drawtext=fontfile='{font}':text='{escaped}':fontcolor=white:fontsize=66:"
         "x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=16:box=1:boxcolor=black@0.38:boxborderw=42:"
-        "alpha='if(lt(t,0.7),t/0.7,if(gt(t,D-0.7),(D-t)/0.7,1))'"
+        f"alpha='if(lt(t,0.7),t/0.7,if(gt(t,{duration}-0.7),({duration}-t)/0.7,1))'"
     )
     header = (
         f"drawtext=fontfile='{font}':text='{template_text}':fontcolor=white@0.72:fontsize=30:"
         "x=(w-text_w)/2:y=90"
     )
     footer = (
-        f"drawtext=fontfile='{font}':text='{friday}':fontcolor=white:fontsize=34:"
+        f"drawtext=fontfile='{font}':text='{footer_text}':fontcolor=white:fontsize=34:"
         "x=(w-text_w)/2:y=h-150:box=1:boxcolor=black@0.30:boxborderw=18"
     )
-    vf = f"{draw.replace('D', str(duration))},{header},{footer}"
+    vf = f"{draw},{header},{footer}"
     inputs = ["-i", str(source)]
     audio_args: list[str] = []
     if music_enabled and MUSIC_FILE.exists():
         inputs += ["-stream_loop", "-1", "-i", str(MUSIC_FILE)]
-        audio_args = ["-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "128k", "-af", "volume=0.20", "-shortest"]
+        audio_args = [
+            "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "128k",
+            "-af", "volume=0.20", "-shortest",
+        ]
     else:
         audio_args = ["-an"]
     command = [
         _ffmpeg(), "-y", *inputs, "-t", str(duration), "-vf", vf,
         "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p",
-        *audio_args, str(output),
+        *audio_args, "-movflags", "+faststart", str(output),
     ]
     subprocess.run(command, check=True, capture_output=True, text=True)
     return output
@@ -196,15 +220,15 @@ def generate_video(topic: str, template: str, duration: int, music_enabled: bool
     scene_count = min(len(queries), max(3, duration // 10))
     selected_queries = queries[:scene_count]
     scene_seconds = duration / scene_count
-    raw_clips: list[Path] = []
     normalized_clips: list[Path] = []
+    used_queries: list[str] = []
     for index, query in enumerate(selected_queries, start=1):
         raw = OUTPUT_DIR / f"scene_{index}.mp4"
         normalized = OUTPUT_DIR / f"scene_{index}_1080.mp4"
         pexels_video(query, raw)
         _normalize_clip(raw, normalized, scene_seconds)
-        raw_clips.append(raw)
         normalized_clips.append(normalized)
+        used_queries.append(_safe_query(query))
     montage = OUTPUT_DIR / "montage.mp4"
     _concat_clips(normalized_clips, montage)
     output = OUTPUT_DIR / "aivideo_short.mp4"
@@ -213,7 +237,7 @@ def generate_video(topic: str, template: str, duration: int, music_enabled: bool
         "ok": True,
         "video_path": str(output),
         "script": script,
-        "scenes": selected_queries,
+        "scenes": used_queries,
         "music_enabled": bool(music_enabled and MUSIC_FILE.exists()),
-        "engine": "ollama+pexels+ffmpeg-multiscene",
+        "engine": "ollama+pexels+ffmpeg-multiscene-v2",
     }
