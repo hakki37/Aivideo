@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from engine import generate_video
 from youtube_uploader import authenticate, upload_video, youtube_status
 
-app = FastAPI(title="Aivideo Local Engine", version="0.4.0")
+app = FastAPI(title="Aivideo Local Engine", version="0.5.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,19 +38,23 @@ def _oauth_worker() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "service": "aivideo-local-engine", "version": "0.4.0"}
+    return {"ok": True, "service": "aivideo-local-engine", "version": "0.5.0"}
 
 
 @app.get("/engines")
 def engines() -> dict:
     return {
-        "brain": "Ollama / Qwen3",
-        "visual": ["Pexels multi-scene", "ComfyUI (optional)", "Wan/LTX (optional)"],
-        "audio": ["local music / ACE-Step (optional)", "Piper (optional)"],
-        "subtitles": "Whisper (optional)",
-        "render": ["FFmpeg", "MoneyPrinterTurbo (optional)"],
-        "quality_control": ["blocked visual metadata filtering", "Vision/CLIP (optional)"],
+        "brain": {"provider": "Ollama", "model": "Qwen3", "local": True},
+        "visual": {
+            "active": ["Pexels multi-scene"],
+            "optional": ["ComfyUI", "Wan", "LTX-Video"],
+            "safety_filter": "blocked visual metadata",
+        },
+        "audio": {"active": ["local music file"], "optional": ["ACE-Step", "Piper"]},
+        "subtitles": {"active": "styled quote overlay", "optional": "Whisper"},
+        "render": ["FFmpeg 1080x1920", "MoneyPrinterTurbo optional"],
         "publisher": "YouTube Data API",
+        "fallbacks": True,
     }
 
 
