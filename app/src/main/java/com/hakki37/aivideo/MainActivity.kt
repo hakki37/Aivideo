@@ -34,6 +34,7 @@ class MainActivity : ComponentActivity() {
         template: String,
         duration: String,
         musicEnabled: Boolean,
+        watermarkEnabled: Boolean,
         youtube: Boolean,
         title: String,
         description: String,
@@ -54,6 +55,7 @@ class MainActivity : ComponentActivity() {
                     "template" to template,
                     "duration" to seconds,
                     "music_enabled" to musicEnabled.toString(),
+                    "watermark_enabled" to watermarkEnabled.toString(),
                     "youtube_enabled" to youtube.toString(),
                     "title" to title,
                     "description" to description,
@@ -75,6 +77,7 @@ class MainActivity : ComponentActivity() {
                 val response = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
                 val message = if (connection.responseCode in 200..299) {
                     if (response.contains("\"uploaded\":true")) "Video hazırlandı ve YouTube'a yüklendi."
+                    else if (response.contains("\"watermark_enabled\":true")) "Video hazırlandı • Islamic Horizon watermark eklendi."
                     else if (response.contains("\"music_enabled\":true")) "Video hazırlandı • müzik eklendi."
                     else "Video başarıyla oluşturuldu."
                 } else {
@@ -94,6 +97,7 @@ class MainActivity : ComponentActivity() {
         var selected by remember { mutableStateOf("Hayırlı Cumalar") }
         var duration by remember { mutableStateOf("30 sn") }
         var musicEnabled by remember { mutableStateOf(true) }
+        var watermarkEnabled by remember { mutableStateOf(true) }
         var youtubeEnabled by remember { mutableStateOf(true) }
         var title by remember { mutableStateOf("") }
         var description by remember { mutableStateOf("") }
@@ -131,22 +135,14 @@ class MainActivity : ComponentActivity() {
                     }
 
                     Text("Yeni Video", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-                    OutlinedTextField(
-                        value = topic, onValueChange = { topic = it }, modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Video konusu") }, placeholder = { Text("Örn. Sabır ve tevekkül") },
-                        minLines = 2, shape = RoundedCornerShape(18.dp)
-                    )
+                    OutlinedTextField(value = topic, onValueChange = { topic = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Video konusu") }, placeholder = { Text("Örn. Sabır ve tevekkül") }, minLines = 2, shape = RoundedCornerShape(18.dp))
 
                     Text("Şablon", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("Hayırlı Cumalar", "Hadis", "Ayet").forEach { item ->
-                            FilterChip(selected = selected == item, onClick = { selected = item }, label = { Text(item) })
-                        }
+                        listOf("Hayırlı Cumalar", "Hadis", "Ayet").forEach { item -> FilterChip(selected = selected == item, onClick = { selected = item }, label = { Text(item) }) }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf("Dua", "İslami Söz", "Normal Söz").forEach { item ->
-                            FilterChip(selected = selected == item, onClick = { selected = item }, label = { Text(item) })
-                        }
+                        listOf("Dua", "İslami Söz", "Normal Söz").forEach { item -> FilterChip(selected = selected == item, onClick = { selected = item }, label = { Text(item) }) }
                     }
 
                     Card(shape = RoundedCornerShape(22.dp)) {
@@ -155,15 +151,21 @@ class MainActivity : ComponentActivity() {
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                                 Column { Text("Süre"); Text("Dikey Shorts • 1080×1920", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    listOf("15 sn", "30 sn", "60 sn").forEach { item ->
-                                        FilterChip(selected = duration == item, onClick = { duration = item }, label = { Text(item) })
-                                    }
+                                    listOf("15 sn", "30 sn", "60 sn").forEach { item -> FilterChip(selected = duration == item, onClick = { duration = item }, label = { Text(item) }) }
                                 }
                             }
                             HorizontalDivider()
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                                 Column { Text("Arka plan müziği"); Text("Yerel müzik / ACE-Step hazırsa kullan", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
                                 Switch(checked = musicEnabled, onCheckedChange = { musicEnabled = it })
+                            }
+                            HorizontalDivider()
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Islamic Horizon watermark", fontWeight = FontWeight.SemiBold)
+                                    Text("Her videonun alt sağında zarif logo", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                                Switch(checked = watermarkEnabled, onCheckedChange = { watermarkEnabled = it })
                             }
                         }
                     }
@@ -182,9 +184,7 @@ class MainActivity : ComponentActivity() {
                             OutlinedTextField(tags, { tags = it }, Modifier.fillMaxWidth(), label = { Text("Etiketler") }, placeholder = { Text("virgülle ayır") }, shape = RoundedCornerShape(14.dp))
                             Text("Yayın durumu", style = MaterialTheme.typography.labelLarge)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                listOf("Özel", "Liste dışı", "Herkese açık").forEach { item ->
-                                    FilterChip(selected = privacy == item, onClick = { privacy = item }, label = { Text(item) })
-                                }
+                                listOf("Özel", "Liste dışı", "Herkese açık").forEach { item -> FilterChip(selected = privacy == item, onClick = { privacy = item }, label = { Text(item) }) }
                             }
                             Text("İlk bağlantıda Google hesabınla YouTube izni verilecek.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
@@ -194,24 +194,18 @@ class MainActivity : ComponentActivity() {
                         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                             Text("PC AI Motoru", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                             Text("Qwen3 + çoklu Pexels sahne + FFmpeg + YouTube", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            OutlinedTextField(
-                                value = backendUrl, onValueChange = { backendUrl = it }, modifier = Modifier.fillMaxWidth(),
-                                label = { Text("Motor adresi") }, placeholder = { Text("http://PC-IP:8000") },
-                                singleLine = true, shape = RoundedCornerShape(14.dp)
-                            )
+                            OutlinedTextField(value = backendUrl, onValueChange = { backendUrl = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Motor adresi") }, placeholder = { Text("http://PC-IP:8000") }, singleLine = true, shape = RoundedCornerShape(14.dp))
                         }
                     }
 
-                    if (statusMessage.isNotBlank()) {
-                        Text(statusMessage, modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    if (statusMessage.isNotBlank()) Text(statusMessage, modifier = Modifier.fillMaxWidth(), color = MaterialTheme.colorScheme.onSurfaceVariant)
 
                     Button(
                         enabled = !busy,
                         onClick = {
                             busy = true
                             statusMessage = "AI motoru çalışıyor… Qwen3 sahneleri planlıyor, görüntüler seçiliyor ve Shorts render ediliyor."
-                            runEngine(backendUrl, topic, selected, duration, musicEnabled, youtubeEnabled, title, description, tags, privacy) { result ->
+                            runEngine(backendUrl, topic, selected, duration, musicEnabled, watermarkEnabled, youtubeEnabled, title, description, tags, privacy) { result ->
                                 busy = false
                                 statusMessage = result
                                 Toast.makeText(this@MainActivity, result, Toast.LENGTH_LONG).show()
@@ -221,9 +215,7 @@ class MainActivity : ComponentActivity() {
                     ) {
                         Text(if (busy) "⏳  VİDEO HAZIRLANIYOR…" else "✦  AI İLE VİDEO OLUŞTUR", fontWeight = FontWeight.Bold)
                     }
-                    OutlinedButton(onClick = { }, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(18.dp)) {
-                        Text("Videolarım")
-                    }
+                    OutlinedButton(onClick = { }, modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(18.dp)) { Text("Videolarım") }
                     Text("Ollama • Pexels • ComfyUI • Piper • Whisper • FFmpeg • YouTube", modifier = Modifier.fillMaxWidth(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
