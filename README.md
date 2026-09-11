@@ -2,6 +2,10 @@
 
 Free/open-source Islamic short video studio.
 
+## Build
+
+GitHub Actions builds a debug APK automatically on every push to `main`.
+
 ## Architecture
 
 - Android: Jetpack Compose controller/editor
