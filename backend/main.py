@@ -7,10 +7,12 @@ from threading import Thread
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 
+from engine import generate_video
 from youtube_uploader import authenticate, upload_video, youtube_status
 
-app = FastAPI(title="Aivideo Local Engine", version="0.1.0")
+app = FastAPI(title="Aivideo Local Engine", version="0.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,7 +22,6 @@ app.add_middleware(
 )
 
 oauth_running = False
-
 oauth_error: str | None = None
 
 
@@ -29,7 +30,7 @@ def _oauth_worker() -> None:
     try:
         authenticate()
         oauth_error = None
-    except Exception as exc:  # noqa: BLE001 - surface setup errors through status endpoint
+    except Exception as exc:  # noqa: BLE001
         oauth_error = str(exc)
     finally:
         oauth_running = False
@@ -37,7 +38,20 @@ def _oauth_worker() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "service": "aivideo-local-engine"}
+    return {"ok": True, "service": "aivideo-local-engine", "version": "0.2.0"}
+
+
+@app.get("/engines")
+def engines() -> dict:
+    return {
+        "brain": "Ollama / Qwen3",
+        "visual": ["Pexels", "ComfyUI (optional)", "Wan/LTX (optional)"],
+        "audio": ["ACE-Step (optional)", "Piper (optional)"],
+        "subtitles": "Whisper (optional)",
+        "render": ["FFmpeg", "MoneyPrinterTurbo (optional)"],
+        "quality_control": ["metadata filtering", "Vision/CLIP (optional)"],
+        "publisher": "YouTube Data API",
+    }
 
 
 @app.get("/youtube/status")
@@ -64,6 +78,28 @@ def youtube_auth() -> dict:
         "authorizing": True,
         "message": "Google OAuth tarayıcıda açılacak. İzin verdikten sonra /youtube/status ile bağlantıyı kontrol et.",
     }
+
+
+@app.post("/generate")
+async def generate(
+    topic: str = Form(""),
+    template: str = Form("Hayırlı Cumalar"),
+    duration: int = Form(30),
+) -> dict:
+    if duration not in {15, 30, 60}:
+        raise HTTPException(status_code=400, detail="Süre 15, 30 veya 60 saniye olmalı.")
+    try:
+        return await asyncio.to_thread(generate_video, topic, template, duration)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.get("/video/latest")
+def latest_video() -> FileResponse:
+    path = Path(__file__).resolve().parent / "output" / "aivideo_short.mp4"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Henüz video üretilmedi.")
+    return FileResponse(path, media_type="video/mp4", filename="aivideo_short.mp4")
 
 
 @app.post("/youtube/upload")
@@ -93,7 +129,6 @@ async def youtube_upload(
             while chunk := await video.read(1024 * 1024):
                 tmp.write(chunk)
 
-        # Google upload is blocking; run it off the FastAPI event loop.
         result = await asyncio.to_thread(
             upload_video,
             temp_path,
