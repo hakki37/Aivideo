@@ -11,11 +11,18 @@ from pathlib import Path
 
 ENGINE_DIR = Path(__file__).resolve().parent
 OUTPUT_DIR = ENGINE_DIR / "output"
+ASSETS_DIR = ENGINE_DIR / "assets"
 OUTPUT_DIR.mkdir(exist_ok=True)
+ASSETS_DIR.mkdir(exist_ok=True)
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
+MUSIC_FILE = Path(os.getenv("AIVIDEO_MUSIC_FILE", str(ASSETS_DIR / "music.mp3")))
+
+BLOCKED_VISUAL_WORDS = (
+    "church", "cross", "cathedral", "christian", "chapel", "crucifix", "jesus", "bible church"
+)
 
 
 def _http_json(url: str, *, method: str = "GET", headers: dict | None = None, data: bytes | None = None) -> dict:
@@ -25,10 +32,11 @@ def _http_json(url: str, *, method: str = "GET", headers: dict | None = None, da
 
 
 def ollama_generate(topic: str, template: str, duration: int) -> dict:
-    prompt = f"""Türkçe İslami Shorts editörüsün. Konu: {topic or 'günün anlamlı mesajı'}. Şablon: {template}. Süre: {duration} saniye.
-Yalnızca JSON döndür. Alanlar: quote, title, description, tags, visual_query.
-quote kısa, güçlü ve ekrana uygun olsun. Ayet/hadis ise kaynak uydurma; emin değilsen genel bir İslami öğüt yaz ve kaynak iddiası yapma.
-visual_query İngilizce, doğal manzara/insan/huzur gibi nötr stok video araması için olsun; kilise, haç, dini sembol ve benzeri Hristiyan görselleri isteme."""
+    prompt = f"""Türkçe İslami Shorts kreatif direktörüsün. Konu: {topic or 'günün anlamlı mesajı'}. Şablon: {template}. Süre: {duration} saniye.
+Yalnızca JSON döndür. Alanlar: quote, title, description, tags, visual_queries.
+visual_queries 3 ila 5 adet İngilizce kısa stok video araması olsun; doğal manzara, gökyüzü, yağmur, kitap, ışık, insan silüeti gibi sinematik ve nötr görüntüler seç. Kilise, haç, katedral, İsa veya Hristiyan sembolleri isteme.
+quote kısa, güçlü ve ekrana uygun olsun. Ayet/hadis ise kaynak uydurma; emin değilsen kaynak iddiası yapma.
+description YouTube için doğal Türkçe açıklama, tags virgülle ayrılmış etiket listesi olsun."""
     payload = json.dumps({
         "model": OLLAMA_MODEL,
         "prompt": prompt,
@@ -44,30 +52,52 @@ visual_query İngilizce, doğal manzara/insan/huzur gibi nötr stok video aramas
     )
     text = result.get("response", "{}").strip()
     try:
-        return json.loads(text)
+        data = json.loads(text)
     except json.JSONDecodeError:
-        return {"quote": text, "title": topic or "Günün Mesajı", "description": "", "tags": [], "visual_query": "peaceful nature"}
+        data = {"quote": text, "title": topic or "Günün Mesajı", "description": "", "tags": [], "visual_queries": ["peaceful nature sunrise", "soft clouds", "cinematic landscape"]}
+    queries = data.get("visual_queries")
+    if isinstance(queries, str):
+        queries = [queries]
+    data["visual_queries"] = [q.strip() for q in (queries or []) if isinstance(q, str) and q.strip()][:5]
+    if not data["visual_queries"]:
+        data["visual_queries"] = ["peaceful nature sunrise", "soft clouds", "cinematic landscape"]
+    return data
+
+
+def _safe_query(query: str) -> str:
+    cleaned = query.strip()
+    for word in BLOCKED_VISUAL_WORDS:
+        cleaned = re.sub(rf"\b{re.escape(word)}\b", "", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip() or "peaceful nature"
 
 
 def pexels_video(query: str, destination: Path) -> Path:
     if not PEXELS_API_KEY:
         raise RuntimeError("PEXELS_API_KEY ayarlı değil.")
-    url = "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({"query": query, "orientation": "portrait", "size": "medium", "per_page": 10})
+    safe_query = _safe_query(query)
+    url = "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({
+        "query": safe_query,
+        "orientation": "portrait",
+        "size": "medium",
+        "per_page": 15,
+    })
     data = _http_json(url, headers={"Authorization": PEXELS_API_KEY})
     candidates = []
     for video in data.get("videos", []):
-        # Avoid obvious religious architecture/symbols in the search result metadata.
-        name = json.dumps(video, ensure_ascii=False).lower()
-        if any(word in name for word in ("church", "cross", "cathedral", "christian")):
+        blob = json.dumps(video, ensure_ascii=False).lower()
+        if any(word in blob for word in BLOCKED_VISUAL_WORDS):
             continue
         for item in video.get("video_files", []):
             width, height = item.get("width", 0), item.get("height", 0)
-            if height >= width and item.get("link"):
-                candidates.append((abs((height / max(width, 1)) - 16 / 9), item["link"]))
+            link = item.get("link")
+            if height >= width and link:
+                ratio_error = abs((height / max(width, 1)) - 16 / 9)
+                quality = min(width, height)
+                candidates.append((ratio_error, -quality, link))
     if not candidates:
-        raise RuntimeError("Uygun portre Pexels videosu bulunamadı.")
-    candidates.sort(key=lambda x: x[0])
-    request = urllib.request.Request(candidates[0][1], headers={"User-Agent": "Aivideo/0.1"})
+        raise RuntimeError(f"Uygun portre Pexels videosu bulunamadı: {safe_query}")
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    request = urllib.request.Request(candidates[0][2], headers={"User-Agent": "Aivideo/0.3"})
     with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
         shutil.copyfileobj(response, output)
     return destination
@@ -80,25 +110,110 @@ def _ffmpeg() -> str:
     return path
 
 
-def render_short(source: Path, output: Path, quote: str, duration: int) -> Path:
-    # 1080x1920, clean dark gradient, centered quote and subtle zoom.
-    safe = re.sub(r"[^\w\u0080-\uFFFF .,!?;:'’()-]", "", quote).strip()[:220]
-    drawtext = (
-        "drawtext=text='" + safe.replace("'", "\\'") + "'"
-        ":fontcolor=white:fontsize=64:fontfile=/Windows/Fonts/arial.ttf"
-        ":x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=14:box=1:boxcolor=black@0.42:boxborderw=35"
+def _normalize_clip(source: Path, destination: Path, seconds: float) -> None:
+    vf = (
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,"
+        "fps=30,"
+        "eq=contrast=1.03:saturation=1.05:brightness=0.01,"
+        "zoompan=z='min(zoom+0.0006,1.07)':d=1:s=1080x1920:fps=30"
     )
-    vf = f"scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,zoompan=z='min(zoom+0.0007,1.08)':d=1:s=1080x1920:fps=30,{drawtext}"
-    command = [_ffmpeg(), "-y", "-stream_loop", "-1", "-i", str(source), "-t", str(duration), "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", str(output)]
+    command = [
+        _ffmpeg(), "-y", "-i", str(source), "-t", f"{seconds:.2f}",
+        "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19",
+        "-pix_fmt", "yuv420p", str(destination),
+    ]
+    subprocess.run(command, check=True, capture_output=True, text=True)
+
+
+def _concat_clips(clips: list[Path], output: Path) -> None:
+    list_file = OUTPUT_DIR / "concat.txt"
+    list_file.write_text("\n".join(f"file '{p.as_posix()}'" for p in clips), encoding="utf-8")
+    command = [
+        _ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
+        "-c", "copy", str(output),
+    ]
+    subprocess.run(command, check=True, capture_output=True, text=True)
+
+
+def _wrap_quote(text: str, max_chars: int = 30) -> str:
+    words = text.split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if current and len(candidate) > max_chars:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return "\\n".join(lines[:6])
+
+
+def render_short(source: Path, output: Path, quote: str, duration: int, template: str, music_enabled: bool) -> Path:
+    safe = re.sub(r"[^\w\u0080-\uFFFF .,!?;:'’()\-]", "", quote).strip()[:220]
+    safe = _wrap_quote(safe)
+    escaped = safe.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
+    template_text = template.upper().replace("'", "")[:24]
+    friday = "🌙 HAYIRLI CUMALAR 🤲" if template == "Hayırlı Cumalar" else "AIVIDEO • İSLAMİ SHORTS"
+    # Use DejaVu on Linux and Arial on Windows; FFmpeg will use whichever exists.
+    font = "/Windows/Fonts/arial.ttf" if os.name == "nt" else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    draw = (
+        f"drawtext=fontfile='{font}':text='{escaped}':fontcolor=white:fontsize=66:"
+        "x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=16:box=1:boxcolor=black@0.38:boxborderw=42:"
+        "alpha='if(lt(t,0.7),t/0.7,if(gt(t,D-0.7),(D-t)/0.7,1))'"
+    )
+    header = (
+        f"drawtext=fontfile='{font}':text='{template_text}':fontcolor=white@0.72:fontsize=30:"
+        "x=(w-text_w)/2:y=90"
+    )
+    footer = (
+        f"drawtext=fontfile='{font}':text='{friday}':fontcolor=white:fontsize=34:"
+        "x=(w-text_w)/2:y=h-150:box=1:boxcolor=black@0.30:boxborderw=18"
+    )
+    vf = f"{draw.replace('D', str(duration))},{header},{footer}"
+    inputs = ["-i", str(source)]
+    audio_args: list[str] = []
+    if music_enabled and MUSIC_FILE.exists():
+        inputs += ["-stream_loop", "-1", "-i", str(MUSIC_FILE)]
+        audio_args = ["-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "128k", "-af", "volume=0.20", "-shortest"]
+    else:
+        audio_args = ["-an"]
+    command = [
+        _ffmpeg(), "-y", *inputs, "-t", str(duration), "-vf", vf,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p",
+        *audio_args, str(output),
+    ]
     subprocess.run(command, check=True, capture_output=True, text=True)
     return output
 
 
-def generate_video(topic: str, template: str, duration: int) -> dict:
+def generate_video(topic: str, template: str, duration: int, music_enabled: bool = True) -> dict:
     script = ollama_generate(topic, template, duration)
-    query = script.get("visual_query") or "peaceful nature sunrise"
-    source = OUTPUT_DIR / "source.mp4"
+    queries = script["visual_queries"]
+    scene_count = min(len(queries), max(3, duration // 10))
+    selected_queries = queries[:scene_count]
+    scene_seconds = duration / scene_count
+    raw_clips: list[Path] = []
+    normalized_clips: list[Path] = []
+    for index, query in enumerate(selected_queries, start=1):
+        raw = OUTPUT_DIR / f"scene_{index}.mp4"
+        normalized = OUTPUT_DIR / f"scene_{index}_1080.mp4"
+        pexels_video(query, raw)
+        _normalize_clip(raw, normalized, scene_seconds)
+        raw_clips.append(raw)
+        normalized_clips.append(normalized)
+    montage = OUTPUT_DIR / "montage.mp4"
+    _concat_clips(normalized_clips, montage)
     output = OUTPUT_DIR / "aivideo_short.mp4"
-    pexels_video(query, source)
-    render_short(source, output, script.get("quote", "Hayra vesile olan bir söz."), duration)
-    return {"ok": True, "video_path": str(output), "script": script, "engine": "ollama+pexels+ffmpeg"}
+    render_short(montage, output, script.get("quote", "Hayra vesile olan bir söz."), duration, template, music_enabled)
+    return {
+        "ok": True,
+        "video_path": str(output),
+        "script": script,
+        "scenes": selected_queries,
+        "music_enabled": bool(music_enabled and MUSIC_FILE.exists()),
+        "engine": "ollama+pexels+ffmpeg-multiscene",
+    }
