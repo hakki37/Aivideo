@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from engine import generate_video
 from youtube_uploader import authenticate, upload_video, youtube_status
 
-app = FastAPI(title="Aivideo Local Engine", version="0.2.0")
+app = FastAPI(title="Aivideo Local Engine", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -38,7 +38,7 @@ def _oauth_worker() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "service": "aivideo-local-engine", "version": "0.2.0"}
+    return {"ok": True, "service": "aivideo-local-engine", "version": "0.3.0"}
 
 
 @app.get("/engines")
@@ -69,15 +69,10 @@ def youtube_auth() -> dict:
     global oauth_running, oauth_error
     if oauth_running:
         return {"started": True, "authorizing": True}
-
     oauth_error = None
     oauth_running = True
     Thread(target=_oauth_worker, daemon=True, name="youtube-oauth").start()
-    return {
-        "started": True,
-        "authorizing": True,
-        "message": "Google OAuth tarayıcıda açılacak. İzin verdikten sonra /youtube/status ile bağlantıyı kontrol et.",
-    }
+    return {"started": True, "authorizing": True, "message": "Google OAuth tarayıcıda açılacak."}
 
 
 @app.post("/generate")
@@ -90,6 +85,48 @@ async def generate(
         raise HTTPException(status_code=400, detail="Süre 15, 30 veya 60 saniye olmalı.")
     try:
         return await asyncio.to_thread(generate_video, topic, template, duration)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/generate-and-upload")
+async def generate_and_upload(
+    topic: str = Form(""),
+    template: str = Form("Hayırlı Cumalar"),
+    duration: int = Form(30),
+    youtube_enabled: bool = Form(True),
+    title: str = Form(""),
+    description: str = Form(""),
+    tags: str = Form("islam, hadis, ayet, dua, islami söz, shorts"),
+    privacy_status: str = Form("private"),
+) -> dict:
+    if duration not in {15, 30, 60}:
+        raise HTTPException(status_code=400, detail="Süre 15, 30 veya 60 saniye olmalı.")
+    try:
+        result = await asyncio.to_thread(generate_video, topic, template, duration)
+        if not youtube_enabled:
+            return result
+
+        status = await asyncio.to_thread(youtube_status)
+        if not status.get("connected"):
+            return {**result, "youtube": {"uploaded": False, "reason": "YouTube hesabı bağlı değil."}}
+
+        script = result.get("script", {})
+        final_title = (title.strip() or script.get("title") or "Aivideo")[:100]
+        final_description = description.strip() or script.get("description", "")
+        generated_tags = script.get("tags", [])
+        if isinstance(generated_tags, str):
+            generated_tags = [x.strip() for x in generated_tags.split(",") if x.strip()]
+        final_tags = [x.strip() for x in tags.split(",") if x.strip()] or generated_tags
+        uploaded = await asyncio.to_thread(
+            upload_video,
+            result["video_path"],
+            final_title,
+            final_description,
+            final_tags,
+            privacy_status,
+        )
+        return {**result, "youtube": {"uploaded": True, **uploaded}}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
@@ -114,10 +151,8 @@ async def youtube_upload(
         status = youtube_status()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(exc)) from exc
-
     if not status.get("connected"):
         raise HTTPException(status_code=401, detail="YouTube hesabı bağlı değil. Önce /youtube/auth çalıştır.")
-
     if not (video.filename or "").lower().endswith(".mp4"):
         raise HTTPException(status_code=400, detail="Sadece MP4 video yüklenebilir.")
 
@@ -128,15 +163,7 @@ async def youtube_upload(
             temp_path = Path(tmp.name)
             while chunk := await video.read(1024 * 1024):
                 tmp.write(chunk)
-
-        result = await asyncio.to_thread(
-            upload_video,
-            temp_path,
-            title,
-            description,
-            tags_list,
-            privacy_status,
-        )
+        result = await asyncio.to_thread(upload_video, temp_path, title, description, tags_list, privacy_status)
         return {"ok": True, **result}
     except HTTPException:
         raise
