@@ -75,7 +75,9 @@ def _pexels_candidates(query: str) -> list[tuple[float, int, str]]:
     if not PEXELS_API_KEY:
         raise RuntimeError("PEXELS_API_KEY ayarlı değil.")
     safe_query = _safe_query(query)
-    url = "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({"query": safe_query, "orientation": "portrait", "size": "medium", "per_page": 20})
+    # Do not force Pexels to return portrait-only clips. Many good stock clips are
+    # landscape/square and FFmpeg safely center-crops them to 1080x1920 later.
+    url = "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({"query": safe_query, "size": "medium", "per_page": 30})
     data = _http_json(url, headers={"Authorization": PEXELS_API_KEY})
     candidates: list[tuple[float, int, str]] = []
     for video in data.get("videos", []):
@@ -85,17 +87,21 @@ def _pexels_candidates(query: str) -> list[tuple[float, int, str]]:
         for item in video.get("video_files", []):
             width, height = item.get("width", 0), item.get("height", 0)
             link = item.get("link")
-            if height >= width and width >= 540 and height >= 960 and link:
+            if width >= 540 and height >= 540 and link:
                 ratio_error = abs((height / max(width, 1)) - 16 / 9)
                 quality = width * height
-                candidates.append((ratio_error, -quality, link))
+                # Prefer vertical clips, but accept high-quality landscape/square
+                # footage because the renderer can crop it into Shorts format.
+                vertical_bonus = 0 if height >= width else 0.08
+                score = ratio_error + vertical_bonus
+                candidates.append((score, -quality, link))
     return candidates
 
 
 def pexels_video(query: str, destination: Path) -> Path:
     queries = [query] + [q for q in FALLBACK_QUERIES if q.lower() != query.lower()]
     all_candidates: list[tuple[float, int, str]] = []
-    for candidate_query in queries[:4]:
+    for candidate_query in queries[:5]:
         try:
             all_candidates.extend(_pexels_candidates(candidate_query))
         except Exception:
@@ -103,7 +109,7 @@ def pexels_video(query: str, destination: Path) -> Path:
         if all_candidates:
             break
     if not all_candidates:
-        raise RuntimeError(f"Uygun portre Pexels videosu bulunamadı: {_safe_query(query)}")
+        raise RuntimeError(f"Uygun Pexels videosu bulunamadı: {_safe_query(query)}")
     all_candidates.sort(key=lambda x: (x[0], x[1]))
     request = urllib.request.Request(all_candidates[0][2], headers={"User-Agent": "Aivideo/0.5"})
     with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
@@ -144,7 +150,7 @@ def _wrap_quote(text: str, max_chars: int = 30) -> str:
             current = candidate
     if current:
         lines.append(current)
-    return "\\n".join(lines[:6])
+    return "\n".join(lines[:6])
 
 
 def render_short(source: Path, output: Path, quote: str, duration: int, template: str, music_enabled: bool, watermark_enabled: bool = True) -> Path:
