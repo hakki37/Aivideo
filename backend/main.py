@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
+import traceback
 from pathlib import Path
 from threading import Thread
 
@@ -12,7 +13,7 @@ from fastapi.responses import FileResponse
 from engine import generate_video
 from youtube_uploader import authenticate, upload_video, youtube_status
 
-app = FastAPI(title="Aivideo Local Engine", version="0.5.1")
+app = FastAPI(title="Aivideo Local Engine", version="0.5.2")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 oauth_running = False
@@ -32,7 +33,7 @@ def _oauth_worker() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "service": "aivideo-local-engine", "version": "0.5.1"}
+    return {"ok": True, "service": "aivideo-local-engine", "version": "0.5.2"}
 
 
 @app.get("/engines")
@@ -83,7 +84,10 @@ async def generate(
     try:
         return await asyncio.to_thread(generate_video, topic, template, duration, music_enabled, watermark_enabled)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        print("\n===== AIVIDEO GENERATION ERROR =====", flush=True)
+        traceback.print_exc()
+        print("===== END AIVIDEO GENERATION ERROR =====\n", flush=True)
+        raise HTTPException(status_code=500, detail=f"Video üretimi başarısız: {exc}") from exc
 
 
 @app.post("/generate-and-upload")
@@ -118,7 +122,10 @@ async def generate_and_upload(
         uploaded = await asyncio.to_thread(upload_video, result["video_path"], final_title, final_description, final_tags, privacy_status)
         return {**result, "youtube": {"uploaded": True, **uploaded}}
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        print("\n===== AIVIDEO GENERATE+UPLOAD ERROR =====", flush=True)
+        traceback.print_exc()
+        print("===== END AIVIDEO GENERATE+UPLOAD ERROR =====\n", flush=True)
+        raise HTTPException(status_code=500, detail=f"Video üretimi/yükleme başarısız: {exc}") from exc
 
 
 @app.get("/video/latest")
