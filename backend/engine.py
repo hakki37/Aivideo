@@ -33,6 +33,9 @@ FALLBACK_QUERIES = [
     "rain on window cinematic",
     "calm ocean sunset",
     "green forest sunlight",
+    "nature cinematic",
+    "sunrise nature",
+    "ocean waves",
 ]
 
 
@@ -75,46 +78,54 @@ def _pexels_candidates(query: str) -> list[tuple[float, int, str]]:
     if not PEXELS_API_KEY:
         raise RuntimeError("PEXELS_API_KEY ayarlı değil.")
     safe_query = _safe_query(query)
-    # Do not force Pexels to return portrait-only clips. Many good stock clips are
-    # landscape/square and FFmpeg safely center-crops them to 1080x1920 later.
     url = "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({"query": safe_query, "size": "medium", "per_page": 30})
-    data = _http_json(url, headers={"Authorization": PEXELS_API_KEY})
+    try:
+        data = _http_json(url, headers={"Authorization": PEXELS_API_KEY})
+    except Exception as exc:
+        raise RuntimeError(f"Pexels API isteği başarısız ({safe_query}): {exc}") from exc
+    videos = data.get("videos", [])
+    if not videos:
+        raise RuntimeError(f"Pexels sonuç döndürmedi ({safe_query}).")
     candidates: list[tuple[float, int, str]] = []
-    for video in data.get("videos", []):
+    for video in videos:
         blob = json.dumps(video, ensure_ascii=False).lower()
         if any(word in blob for word in BLOCKED_VISUAL_WORDS):
             continue
         for item in video.get("video_files", []):
-            width, height = item.get("width", 0), item.get("height", 0)
+            width = int(item.get("width") or 0)
+            height = int(item.get("height") or 0)
             link = item.get("link")
-            if width >= 540 and height >= 540 and link:
-                ratio_error = abs((height / max(width, 1)) - 16 / 9)
-                quality = width * height
-                # Prefer vertical clips, but accept high-quality landscape/square
-                # footage because the renderer can crop it into Shorts format.
-                vertical_bonus = 0 if height >= width else 0.08
-                score = ratio_error + vertical_bonus
-                candidates.append((score, -quality, link))
+            if not link:
+                continue
+            ratio_error = abs((height / max(width, 1)) - 16 / 9) if width and height else 1.0
+            quality = width * height
+            vertical_bonus = 0 if height >= width and width else 0.08
+            candidates.append((ratio_error + vertical_bonus, -quality, link))
+    if not candidates:
+        raise RuntimeError(f"Pexels sonuçlarında indirilebilir video dosyası yok ({safe_query}).")
     return candidates
 
 
 def pexels_video(query: str, destination: Path) -> Path:
-    queries = [query] + [q for q in FALLBACK_QUERIES if q.lower() != query.lower()]
-    all_candidates: list[tuple[float, int, str]] = []
-    for candidate_query in queries[:5]:
+    queries: list[str] = []
+    for candidate in [query, *FALLBACK_QUERIES]:
+        safe = _safe_query(candidate)
+        if safe and safe.lower() not in {q.lower() for q in queries}:
+            queries.append(safe)
+    errors: list[str] = []
+    for candidate_query in queries[:8]:
         try:
-            all_candidates.extend(_pexels_candidates(candidate_query))
-        except Exception:
-            continue
-        if all_candidates:
-            break
-    if not all_candidates:
-        raise RuntimeError(f"Uygun Pexels videosu bulunamadı: {_safe_query(query)}")
-    all_candidates.sort(key=lambda x: (x[0], x[1]))
-    request = urllib.request.Request(all_candidates[0][2], headers={"User-Agent": "Aivideo/0.5"})
-    with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
-        shutil.copyfileobj(response, output)
-    return destination
+            candidates = _pexels_candidates(candidate_query)
+            candidates.sort(key=lambda x: (x[0], x[1]))
+            request = urllib.request.Request(candidates[0][2], headers={"User-Agent": "Aivideo/0.6"})
+            with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
+                shutil.copyfileobj(response, output)
+            if destination.stat().st_size > 0:
+                return destination
+            errors.append(f"{candidate_query}: indirilen dosya boş")
+        except Exception as exc:
+            errors.append(f"{candidate_query}: {exc}")
+    raise RuntimeError("Pexels video bulunamadı. " + " | ".join(errors[:4]))
 
 
 def _ffmpeg() -> str:
@@ -184,12 +195,7 @@ def render_short(source: Path, output: Path, quote: str, duration: int, template
     else:
         audio_args = ["-an"]
 
-    command = [
-        _ffmpeg(), "-y", *inputs, "-t", str(duration),
-        "-filter_complex", video_filter, "-map", "[vout]",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p",
-        *audio_args, "-movflags", "+faststart", str(output),
-    ]
+    command = [_ffmpeg(), "-y", *inputs, "-t", str(duration), "-filter_complex", video_filter, "-map", "[vout]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p", *audio_args, "-movflags", "+faststart", str(output)]
     subprocess.run(command, check=True, capture_output=True, text=True)
     return output
 
@@ -213,12 +219,4 @@ def generate_video(topic: str, template: str, duration: int, music_enabled: bool
     _concat_clips(normalized_clips, montage)
     output = OUTPUT_DIR / "aivideo_short.mp4"
     render_short(montage, output, script.get("quote", "Hayra vesile olan bir söz."), duration, template, music_enabled, watermark_enabled)
-    return {
-        "ok": True,
-        "video_path": str(output),
-        "script": script,
-        "scenes": used_queries,
-        "music_enabled": bool(music_enabled and MUSIC_FILE.exists()),
-        "watermark_enabled": bool(watermark_enabled and WATERMARK_FILE.exists()),
-        "engine": "ollama+pexels+ffmpeg-multiscene-watermark",
-    }
+    return {"ok": True, "video_path": str(output), "script": script, "scenes": used_queries, "music_enabled": bool(music_enabled and MUSIC_FILE.exists()), "watermark_enabled": bool(watermark_enabled and WATERMARK_FILE.exists()), "engine": "ollama+pexels+ffmpeg-multiscene-watermark"}
