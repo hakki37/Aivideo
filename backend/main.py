@@ -11,9 +11,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from engine import generate_video
+from story_engine import generate_story_video
 from youtube_uploader import authenticate, upload_video, youtube_status
 
-app = FastAPI(title="Aivideo Local Engine", version="0.5.2")
+app = FastAPI(title="Aivideo Local Engine", version="0.6.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 
 oauth_running = False
@@ -33,7 +34,7 @@ def _oauth_worker() -> None:
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "service": "aivideo-local-engine", "version": "0.5.2"}
+    return {"ok": True, "service": "aivideo-local-engine", "version": "0.6.0"}
 
 
 @app.get("/engines")
@@ -41,11 +42,12 @@ def engines() -> dict:
     return {
         "brain": {"provider": "Ollama", "model": "Qwen3", "local": True},
         "visual": {"active": ["Pexels multi-scene"], "optional": ["ComfyUI", "Wan", "LTX-Video"], "safety_filter": "blocked visual metadata"},
-        "audio": {"active": ["local music file"], "optional": ["ACE-Step", "Piper"]},
+        "audio": {"active": ["local music file"], "optional": ["ACE-Step", "Piper", "Windows SAPI via pyttsx3"]},
         "subtitles": {"active": "styled quote overlay", "optional": "Whisper"},
         "render": ["FFmpeg 1080x1920", "MoneyPrinterTurbo optional"],
         "publisher": "YouTube Data API",
         "watermark": {"active": "Islamic Horizon", "default": True, "position": "bottom-right"},
+        "story": {"active": True, "durations_minutes": [15, 20], "narration": "local TTS when available"},
         "fallbacks": True,
     }
 
@@ -88,6 +90,26 @@ async def generate(
         traceback.print_exc()
         print("===== END AIVIDEO GENERATION ERROR =====\n", flush=True)
         raise HTTPException(status_code=500, detail=f"Video üretimi başarısız: {exc}") from exc
+
+
+@app.post("/generate-story")
+async def generate_story(
+    topic: str = Form(""),
+    minutes: int = Form(15),
+    music_enabled: bool = Form(True),
+    watermark_enabled: bool = Form(True),
+) -> dict:
+    if minutes not in {15, 20}:
+        raise HTTPException(status_code=400, detail="Hikâye süresi 15 veya 20 dakika olmalı.")
+    if not topic.strip():
+        raise HTTPException(status_code=400, detail="Hikâye konusu boş bırakılamaz.")
+    try:
+        return await asyncio.to_thread(generate_story_video, topic, minutes, music_enabled, watermark_enabled)
+    except Exception as exc:  # noqa: BLE001
+        print("\n===== AIVIDEO STORY ERROR =====", flush=True)
+        traceback.print_exc()
+        print("===== END AIVIDEO STORY ERROR =====\n", flush=True)
+        raise HTTPException(status_code=500, detail=f"Hikâye videosu üretilemedi: {exc}") from exc
 
 
 @app.post("/generate-and-upload")
@@ -134,6 +156,14 @@ def latest_video() -> FileResponse:
     if not path.exists():
         raise HTTPException(status_code=404, detail="Henüz video üretilmedi.")
     return FileResponse(path, media_type="video/mp4", filename="aivideo_short.mp4")
+
+
+@app.get("/video/story")
+def latest_story_video() -> FileResponse:
+    path = Path(__file__).resolve().parent / "output" / "aivideo_story.mp4"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Henüz hikâye videosu üretilmedi.")
+    return FileResponse(path, media_type="video/mp4", filename="aivideo_story.mp4")
 
 
 @app.post("/youtube/upload")
