@@ -5,6 +5,8 @@ import os
 import re
 import shutil
 import subprocess
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -30,12 +32,49 @@ FFMPEG_MIN_TIMEOUT = int(os.getenv("AIVIDEO_FFMPEG_TIMEOUT", "180"))
 
 BLOCKED_VISUAL_WORDS = ("church", "cross", "cathedral", "christian", "chapel", "crucifix", "jesus", "bible church", "steeple", "altar", "mosque interior")
 FALLBACK_QUERIES = ["peaceful sunrise mountains", "soft clouds golden light", "rain on window cinematic", "calm ocean sunset", "green forest sunlight", "nature cinematic", "sunrise nature", "ocean waves"]
+PEXELS_VIDEO_SEARCH_URL = "https://api.pexels.com/v1/videos/search"
+PEXELS_RATE_LIMIT_RETRIES = 2
+PEXELS_MAX_BACKOFF_SECONDS = 8
+
+
+class PexelsApiError(RuntimeError):
+    """A Pexels response whose status should control fallback-query behaviour."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
 
 
 def _http_json(url: str, *, method: str = "GET", headers: dict | None = None, data: bytes | None = None) -> dict:
     request = urllib.request.Request(url, method=method, headers=headers or {}, data=data)
     with urllib.request.urlopen(request, timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _pexels_json(query: str, *, per_page: int) -> dict:
+    """Call Pexels once, retrying only a bounded number of rate-limit responses."""
+    url = PEXELS_VIDEO_SEARCH_URL + "?" + urllib.parse.urlencode(
+        {"query": query, "size": "medium", "per_page": per_page}
+    )
+    for attempt in range(PEXELS_RATE_LIMIT_RETRIES + 1):
+        try:
+            return _http_json(url, headers={"Authorization": PEXELS_API_KEY})
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                raise PexelsApiError(401, "Pexels API anahtarı geçersiz veya eksik (HTTP 401).") from exc
+            if exc.code == 403:
+                raise PexelsApiError(403, "Pexels API anahtarının video arama erişimi yok (HTTP 403).") from exc
+            if exc.code != 429:
+                raise PexelsApiError(exc.code, f"Pexels API isteği başarısız (HTTP {exc.code}).") from exc
+
+            if attempt == PEXELS_RATE_LIMIT_RETRIES:
+                raise PexelsApiError(429, "Pexels istek sınırı aşıldı (HTTP 429); sınırlı yeniden denemeler tükendi.") from exc
+            retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                delay = float(retry_after) if retry_after else float(2 ** attempt)
+            except ValueError:
+                delay = float(2 ** attempt)
+            time.sleep(min(max(delay, 0), PEXELS_MAX_BACKOFF_SECONDS))
 
 
 def _run_ffmpeg(command: list[str], *, timeout: int | None = None, context: str = "ffmpeg") -> None:
@@ -74,11 +113,10 @@ def _safe_query(query: str) -> str:
 
 
 def _pexels_candidates(query: str) -> list[tuple[float, int, str]]:
-    if not PEXELS_API_KEY: raise RuntimeError("PEXELS_API_KEY ayarlı değil.")
+    if not PEXELS_API_KEY:
+        raise PexelsApiError(401, "PEXELS_API_KEY ayarlı değil.")
     safe_query = _safe_query(query)
-    url = "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({"query": safe_query, "size": "medium", "per_page": 30})
-    try: data = _http_json(url, headers={"Authorization": PEXELS_API_KEY})
-    except Exception as exc: raise RuntimeError(f"Pexels API isteği başarısız ({safe_query}): {exc}") from exc
+    data = _pexels_json(safe_query, per_page=30)
     candidates = []
     for video in data.get("videos", []):
         blob = json.dumps(video, ensure_ascii=False).lower()
@@ -105,6 +143,10 @@ def pexels_video(query: str, destination: Path) -> Path:
             with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output: shutil.copyfileobj(response, output)
             if destination.stat().st_size > 0: return destination
             errors.append(f"{candidate_query}: indirilen dosya boş")
+        except PexelsApiError:
+            # Authentication/authorization and rate-limit errors apply to every
+            # query, so trying the remaining fallbacks only hides the real cause.
+            raise
         except Exception as exc: errors.append(f"{candidate_query}: {exc}")
     raise RuntimeError("Pexels video bulunamadı. " + " | ".join(errors[:4]))
 

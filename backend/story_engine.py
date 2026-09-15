@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import urllib.parse
 import urllib.request
@@ -9,7 +10,10 @@ import uuid
 from pathlib import Path
 
 from dotenv import load_dotenv
-from engine import WATERMARK_FILE, WATERMARK_OPACITY, WATERMARK_WIDTH, _ffmpeg, _run_ffmpeg, _safe_query, FALLBACK_QUERIES
+from engine import (
+    WATERMARK_FILE, WATERMARK_OPACITY, WATERMARK_WIDTH, PexelsApiError,
+    _ffmpeg, _pexels_json, _run_ffmpeg, _safe_query, FALLBACK_QUERIES,
+)
 
 ENGINE_DIR = Path(__file__).resolve().parent
 load_dotenv(ENGINE_DIR / ".env")
@@ -66,14 +70,14 @@ def generate_story_script(topic: str, minutes: int) -> dict:
 
 def _pexels_video(query: str, destination: Path) -> Path:
     if not PEXELS_API_KEY:
-        raise RuntimeError("PEXELS_API_KEY ayarlı değil.")
+        raise PexelsApiError(401, "PEXELS_API_KEY ayarlı değil.")
     safe = _safe_query(query)
     queries = [safe] + [q for q in FALLBACK_QUERIES if q.lower() != safe.lower()]
     errors = []
     for candidate_query in queries[:8]:
         try:
-            url = "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({"query": candidate_query, "size": "medium", "per_page": 20})
-            data = _http_json(url, headers={"Authorization": PEXELS_API_KEY})
+            # Story footage is deliberately ranked for landscape (16:9) clips.
+            data = _pexels_json(candidate_query, per_page=20)
             candidates = []
             for video in data.get("videos", []):
                 blob = json.dumps(video, ensure_ascii=False).lower()
@@ -94,6 +98,10 @@ def _pexels_video(query: str, destination: Path) -> Path:
                 shutil.copyfileobj(response, output)
             if destination.stat().st_size > 0:
                 return destination
+        except PexelsApiError:
+            # 401/403 cannot be fixed by a different query.  _pexels_json has
+            # already performed the bounded backoff for 429 as well.
+            raise
         except Exception as exc:
             errors.append(f"{candidate_query}: {exc}")
     raise RuntimeError("Hikâye için Pexels videosu bulunamadı. " + " | ".join(errors[:4]))
