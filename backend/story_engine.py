@@ -2,16 +2,17 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
-import subprocess
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
-from engine import WATERMARK_FILE, WATERMARK_OPACITY, WATERMARK_WIDTH, _ffmpeg, _safe_query, FALLBACK_QUERIES
+from dotenv import load_dotenv
+from engine import WATERMARK_FILE, WATERMARK_OPACITY, WATERMARK_WIDTH, _ffmpeg, _run_ffmpeg, _safe_query, FALLBACK_QUERIES
 
 ENGINE_DIR = Path(__file__).resolve().parent
+load_dotenv(ENGINE_DIR / ".env")
 OUTPUT_DIR = ENGINE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
@@ -99,34 +100,36 @@ def _pexels_video(query: str, destination: Path) -> Path:
 
 
 def _normalize_story_clip(source: Path, destination: Path, seconds: float) -> None:
-    # Long-form YouTube story: true 16:9, 1920x1080.
+    # Long-form YouTube story: true 16:9, 1920x1080. Loop short source clips to
+    # guarantee that each scene actually occupies its allocated duration.
     vf = "scale=1920:1080:force_original_aspect_ratio=increase,crop=1920:1080,fps=30,eq=contrast=1.03:saturation=1.05:brightness=0.01,zoompan=z='min(zoom+0.00035,1.06)':d=1:s=1920x1080:fps=30"
-    command = [_ffmpeg(), "-y", "-i", str(source), "-t", f"{seconds:.2f}", "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", str(destination)]
-    subprocess.run(command, check=True, capture_output=True, text=True)
+    command = [_ffmpeg(), "-y", "-stream_loop", "-1", "-i", str(source), "-t", f"{seconds:.2f}", "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", str(destination)]
+    _run_ffmpeg(command, timeout=max(180, int(seconds * 6) + 120), context=f"story sahne normalize ({seconds:.0f}sn)")
 
 
 def _concat(clips: list[Path], output: Path) -> None:
-    list_file = OUTPUT_DIR / "story_concat.txt"
+    list_file = output.parent / "story_concat.txt"
     list_file.write_text("\n".join(f"file '{p.as_posix()}'" for p in clips), encoding="utf-8")
-    subprocess.run([_ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", "-movflags", "+faststart", str(output)], check=True, capture_output=True, text=True)
+    _run_ffmpeg([_ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", "-movflags", "+faststart", str(output)], timeout=300, context="story sahne birlestirme")
 
 
 def _tts(text: str, destination: Path) -> bool:
     try:
         import pyttsx3
-    except ImportError:
+        engine = pyttsx3.init()
+        for voice in engine.getProperty("voices") or []:
+            info = f"{getattr(voice, 'id', '')} {getattr(voice, 'name', '')}".lower()
+            if any(x in info for x in ("turkish", "türk", "tr-tr", "tr_tr", "turkiye", "turkey")):
+                engine.setProperty("voice", voice.id)
+                break
+        engine.setProperty("rate", int(os.getenv("AIVIDEO_TTS_RATE", "145")))
+        engine.setProperty("volume", 1.0)
+        engine.save_to_file(text, str(destination))
+        engine.runAndWait()
+        return destination.exists() and destination.stat().st_size > 0
+    except Exception as exc:
+        print(f"TTS devre dışı bırakıldı: {exc}", flush=True)
         return False
-    engine = pyttsx3.init()
-    for voice in engine.getProperty("voices") or []:
-        info = f"{getattr(voice, 'id', '')} {getattr(voice, 'name', '')}".lower()
-        if any(x in info for x in ("turkish", "türk", "tr-tr", "tr_tr", "turkiye", "turkey")):
-            engine.setProperty("voice", voice.id)
-            break
-    engine.setProperty("rate", int(os.getenv("AIVIDEO_TTS_RATE", "145")))
-    engine.setProperty("volume", 1.0)
-    engine.save_to_file(text, str(destination))
-    engine.runAndWait()
-    return destination.exists() and destination.stat().st_size > 0
 
 
 def _render_story(source: Path, audio: Path | None, output: Path, duration: int, title: str, music_enabled: bool, watermark_enabled: bool) -> Path:
@@ -157,27 +160,35 @@ def _render_story(source: Path, audio: Path | None, output: Path, duration: int,
         else:
             audio_args = ["-map", f"{narration_index}:a:0", "-c:a", "aac", "-b:a", "128k", "-t", str(duration)]
     command = [_ffmpeg(), "-y", *inputs, "-t", str(duration), "-filter_complex", ";".join(filters), "-map", f"[{label}]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", *audio_args, "-movflags", "+faststart", str(output)]
-    subprocess.run(command, check=True, capture_output=True, text=True)
+    _run_ffmpeg(command, timeout=max(300, duration * 4), context="story final render")
     return output
 
 
 def generate_story_video(topic: str, minutes: int = 15, music_enabled: bool = True, watermark_enabled: bool = True) -> dict:
+    job_id = uuid.uuid4().hex[:12]
+    job_dir = OUTPUT_DIR / "jobs" / f"story_{job_id}"
+    job_dir.mkdir(parents=True, exist_ok=True)
     story = generate_story_script(topic, minutes)
-    (OUTPUT_DIR / "story_script.json").write_text(json.dumps(story, ensure_ascii=False, indent=2), encoding="utf-8")
+    (job_dir / "story_script.json").write_text(json.dumps(story, ensure_ascii=False, indent=2), encoding="utf-8")
     scenes = story["scenes"]
     scene_seconds = (minutes * 60) / len(scenes)
     clips, used = [], []
     for i, scene in enumerate(scenes, 1):
-        raw = OUTPUT_DIR / f"story_scene_{i}.mp4"
-        normalized = OUTPUT_DIR / f"story_scene_{i}_1080p.mp4"
+        raw = job_dir / f"story_scene_{i}.mp4"
+        normalized = job_dir / f"story_scene_{i}_1080p.mp4"
         _pexels_video(scene["visual_query"], raw)
         _normalize_story_clip(raw, normalized, scene_seconds)
         clips.append(normalized)
         used.append(scene["visual_query"])
-    montage = OUTPUT_DIR / "story_montage.mp4"
+    montage = job_dir / "story_montage.mp4"
     _concat(clips, montage)
-    narration = OUTPUT_DIR / "story_narration.wav"
+    narration = job_dir / "story_narration.wav"
     tts_ok = _tts("\n\n".join(s["narration"] for s in scenes), narration)
-    output = OUTPUT_DIR / "aivideo_story.mp4"
+    output = job_dir / "aivideo_story.mp4"
     _render_story(montage, narration if tts_ok else None, output, minutes * 60, story["title"], music_enabled, watermark_enabled)
-    return {"ok": True, "video_path": str(output), "script": story, "scenes": used, "narration_enabled": tts_ok, "music_enabled": bool(music_enabled and MUSIC_FILE.exists()), "watermark_enabled": bool(watermark_enabled and WATERMARK_FILE.exists()), "engine": "qwen3+pexels+ffmpeg-story-16x9+local-tts"}
+    latest = OUTPUT_DIR / "aivideo_story.mp4"
+    try:
+        shutil.copyfile(output, latest)
+    except OSError:
+        pass
+    return {"ok": True, "job_id": job_id, "video_path": str(output), "script": story, "scenes": used, "narration_enabled": tts_ok, "music_enabled": bool(music_enabled and MUSIC_FILE.exists()), "watermark_enabled": bool(watermark_enabled and WATERMARK_FILE.exists()), "engine": "qwen3+pexels+ffmpeg-story-16x9+local-tts"}
