@@ -7,9 +7,13 @@ import shutil
 import subprocess
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 ENGINE_DIR = Path(__file__).resolve().parent
+load_dotenv(ENGINE_DIR / ".env")
 OUTPUT_DIR = ENGINE_DIR / "output"
 ASSETS_DIR = ENGINE_DIR / "assets"
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -19,24 +23,13 @@ OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY", "")
 MUSIC_FILE = Path(os.getenv("AIVIDEO_MUSIC_FILE", str(ASSETS_DIR / "music.mp3")))
-WATERMARK_FILE = Path(os.getenv("AIVIDEO_WATERMARK_FILE", str(ASSETS_DIR / "islamic_horizon_watermark.png")))
+WATERMARK_FILE = Path(os.getenv("AIVIDEO_WATERMARK_FILE", str(ASSETS_DIR / "mana_watermark.png")))
 WATERMARK_OPACITY = float(os.getenv("AIVIDEO_WATERMARK_OPACITY", "0.65"))
 WATERMARK_WIDTH = int(os.getenv("AIVIDEO_WATERMARK_WIDTH", "220"))
+FFMPEG_MIN_TIMEOUT = int(os.getenv("AIVIDEO_FFMPEG_TIMEOUT", "180"))
 
-BLOCKED_VISUAL_WORDS = (
-    "church", "cross", "cathedral", "christian", "chapel", "crucifix", "jesus",
-    "bible church", "steeple", "altar", "mosque interior"
-)
-FALLBACK_QUERIES = [
-    "peaceful sunrise mountains",
-    "soft clouds golden light",
-    "rain on window cinematic",
-    "calm ocean sunset",
-    "green forest sunlight",
-    "nature cinematic",
-    "sunrise nature",
-    "ocean waves",
-]
+BLOCKED_VISUAL_WORDS = ("church", "cross", "cathedral", "christian", "chapel", "crucifix", "jesus", "bible church", "steeple", "altar", "mosque interior")
+FALLBACK_QUERIES = ["peaceful sunrise mountains", "soft clouds golden light", "rain on window cinematic", "calm ocean sunset", "green forest sunlight", "nature cinematic", "sunrise nature", "ocean waves"]
 
 
 def _http_json(url: str, *, method: str = "GET", headers: dict | None = None, data: bytes | None = None) -> dict:
@@ -45,178 +38,152 @@ def _http_json(url: str, *, method: str = "GET", headers: dict | None = None, da
         return json.loads(response.read().decode("utf-8"))
 
 
+def _run_ffmpeg(command: list[str], *, timeout: int | None = None, context: str = "ffmpeg") -> None:
+    effective_timeout = max(timeout or FFMPEG_MIN_TIMEOUT, FFMPEG_MIN_TIMEOUT)
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=effective_timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"FFmpeg {effective_timeout} saniye içinde tamamlanamadı ({context}).") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        if len(stderr) > 1500: stderr = stderr[-1500:]
+        raise RuntimeError(f"FFmpeg hatası ({context}, exit={exc.returncode}): {stderr or 'stderr boş'}") from exc
+
+
 def ollama_generate(topic: str, template: str, duration: int) -> dict:
-    prompt = f"""Türkçe İslami Shorts kreatif direktörüsün. Konu: {topic or 'günün anlamlı mesajı'}. Şablon: {template}. Süre: {duration} saniye.
+    prompt = f'''Türkçe İslami Shorts kreatif direktörüsün. Konu: {topic or 'günün anlamlı mesajı'}. Şablon: {template}. Süre: {duration} saniye.
 Yalnızca JSON döndür. Alanlar: quote, title, description, tags, visual_queries.
 visual_queries 3 ila 5 adet İngilizce kısa stok video araması olsun; doğal manzara, gökyüzü, yağmur, kitap, ışık, insan silüeti gibi sinematik ve nötr görüntüler seç. Kilise, haç, katedral, İsa veya Hristiyan sembolleri isteme.
 quote kısa, güçlü ve ekrana uygun olsun. Ayet/hadis ise kaynak uydurma; emin değilsen kaynak iddiası yapma.
-description YouTube için doğal Türkçe açıklama, tags virgülle ayrılmış etiket listesi olsun."""
+description YouTube için doğal Türkçe açıklama, tags virgülle ayrılmış etiket listesi olsun.'''
     payload = json.dumps({"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "format": "json", "options": {"temperature": 0.65}}).encode("utf-8")
     result = _http_json(f"{OLLAMA_URL.rstrip('/')}/api/generate", method="POST", headers={"Content-Type": "application/json"}, data=payload)
     text = result.get("response", "{}").strip()
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        data = {"quote": text, "title": topic or "Günün Mesajı", "description": "", "tags": [], "visual_queries": FALLBACK_QUERIES[:3]}
+    try: data = json.loads(text)
+    except json.JSONDecodeError: data = {"quote": text, "title": topic or "Günün Mesajı", "description": "", "tags": [], "visual_queries": FALLBACK_QUERIES[:3]}
     queries = data.get("visual_queries")
-    if isinstance(queries, str):
-        queries = [queries]
-    data["visual_queries"] = [q.strip() for q in (queries or []) if isinstance(q, str) and q.strip()][:5]
-    if not data["visual_queries"]:
-        data["visual_queries"] = FALLBACK_QUERIES[:3]
+    if isinstance(queries, str): queries = [queries]
+    data["visual_queries"] = [q.strip() for q in (queries or []) if isinstance(q, str) and q.strip()][:5] or FALLBACK_QUERIES[:3]
     return data
 
 
 def _safe_query(query: str) -> str:
     cleaned = query.strip()
-    for word in BLOCKED_VISUAL_WORDS:
-        cleaned = re.sub(rf"\b{re.escape(word)}\b", "", cleaned, flags=re.IGNORECASE)
+    for word in BLOCKED_VISUAL_WORDS: cleaned = re.sub(rf"\b{re.escape(word)}\b", "", cleaned, flags=re.IGNORECASE)
     return re.sub(r"\s+", " ", cleaned).strip() or "peaceful nature"
 
 
 def _pexels_candidates(query: str) -> list[tuple[float, int, str]]:
-    if not PEXELS_API_KEY:
-        raise RuntimeError("PEXELS_API_KEY ayarlı değil.")
+    if not PEXELS_API_KEY: raise RuntimeError("PEXELS_API_KEY ayarlı değil.")
     safe_query = _safe_query(query)
     url = "https://api.pexels.com/videos/search?" + urllib.parse.urlencode({"query": safe_query, "size": "medium", "per_page": 30})
-    try:
-        data = _http_json(url, headers={"Authorization": PEXELS_API_KEY})
-    except Exception as exc:
-        raise RuntimeError(f"Pexels API isteği başarısız ({safe_query}): {exc}") from exc
-    videos = data.get("videos", [])
-    if not videos:
-        raise RuntimeError(f"Pexels sonuç döndürmedi ({safe_query}).")
-    candidates: list[tuple[float, int, str]] = []
-    for video in videos:
+    try: data = _http_json(url, headers={"Authorization": PEXELS_API_KEY})
+    except Exception as exc: raise RuntimeError(f"Pexels API isteği başarısız ({safe_query}): {exc}") from exc
+    candidates = []
+    for video in data.get("videos", []):
         blob = json.dumps(video, ensure_ascii=False).lower()
-        if any(word in blob for word in BLOCKED_VISUAL_WORDS):
-            continue
+        if any(word in blob for word in BLOCKED_VISUAL_WORDS): continue
         for item in video.get("video_files", []):
-            width = int(item.get("width") or 0)
-            height = int(item.get("height") or 0)
-            link = item.get("link")
-            if not link:
-                continue
+            width, height, link = int(item.get("width") or 0), int(item.get("height") or 0), item.get("link")
+            if not link: continue
             ratio_error = abs((height / max(width, 1)) - 16 / 9) if width and height else 1.0
-            quality = width * height
-            vertical_bonus = 0 if height >= width and width else 0.08
-            candidates.append((ratio_error + vertical_bonus, -quality, link))
-    if not candidates:
-        raise RuntimeError(f"Pexels sonuçlarında indirilebilir video dosyası yok ({safe_query}).")
+            candidates.append((ratio_error, -(width * height), link))
+    if not candidates: raise RuntimeError(f"Pexels sonuçlarında indirilebilir video yok ({safe_query}).")
     return candidates
 
 
 def pexels_video(query: str, destination: Path) -> Path:
-    queries: list[str] = []
+    queries = []
     for candidate in [query, *FALLBACK_QUERIES]:
         safe = _safe_query(candidate)
-        if safe and safe.lower() not in {q.lower() for q in queries}:
-            queries.append(safe)
-    errors: list[str] = []
+        if safe and safe.lower() not in {q.lower() for q in queries}: queries.append(safe)
+    errors = []
     for candidate_query in queries[:8]:
         try:
-            candidates = _pexels_candidates(candidate_query)
-            candidates.sort(key=lambda x: (x[0], x[1]))
+            candidates = _pexels_candidates(candidate_query); candidates.sort(key=lambda x: (x[0], x[1]))
             request = urllib.request.Request(candidates[0][2], headers={"User-Agent": "Aivideo/0.6"})
-            with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output:
-                shutil.copyfileobj(response, output)
-            if destination.stat().st_size > 0:
-                return destination
+            with urllib.request.urlopen(request, timeout=120) as response, destination.open("wb") as output: shutil.copyfileobj(response, output)
+            if destination.stat().st_size > 0: return destination
             errors.append(f"{candidate_query}: indirilen dosya boş")
-        except Exception as exc:
-            errors.append(f"{candidate_query}: {exc}")
+        except Exception as exc: errors.append(f"{candidate_query}: {exc}")
     raise RuntimeError("Pexels video bulunamadı. " + " | ".join(errors[:4]))
 
 
 def _ffmpeg() -> str:
     path = shutil.which("ffmpeg")
-    if not path:
-        raise RuntimeError("FFmpeg PATH üzerinde bulunamadı.")
+    if not path: raise RuntimeError("FFmpeg PATH üzerinde bulunamadı.")
     return path
 
 
 def _normalize_clip(source: Path, destination: Path, seconds: float) -> None:
     vf = "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,fps=30,eq=contrast=1.03:saturation=1.05:brightness=0.01,zoompan=z='min(zoom+0.0006,1.07)':d=1:s=1080x1920:fps=30"
-    command = [_ffmpeg(), "-y", "-i", str(source), "-t", f"{seconds:.2f}", "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p", str(destination)]
-    subprocess.run(command, check=True, capture_output=True, text=True)
+    command = [_ffmpeg(), "-y", "-stream_loop", "-1", "-i", str(source), "-t", f"{seconds:.2f}", "-vf", vf, "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p", str(destination)]
+    _run_ffmpeg(command, timeout=max(FFMPEG_MIN_TIMEOUT, int(seconds * 6) + 60), context=f"shorts sahne normalize ({seconds:.0f}sn)")
 
 
 def _concat_clips(clips: list[Path], output: Path) -> None:
-    list_file = OUTPUT_DIR / "concat.txt"
+    list_file = output.parent / "concat.txt"
     list_file.write_text("\n".join(f"file '{p.as_posix()}'" for p in clips), encoding="utf-8")
-    command = [_ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", "-movflags", "+faststart", str(output)]
-    subprocess.run(command, check=True, capture_output=True, text=True)
+    _run_ffmpeg([_ffmpeg(), "-y", "-f", "concat", "-safe", "0", "-i", str(list_file), "-c", "copy", "-movflags", "+faststart", str(output)], timeout=300, context="shorts sahne birleştirme")
 
 
 def _wrap_quote(text: str, max_chars: int = 30) -> str:
-    words = text.split()
-    lines: list[str] = []
-    current = ""
+    words = text.split(); lines = []; current = ""
     for word in words:
         candidate = f"{current} {word}".strip()
-        if current and len(candidate) > max_chars:
-            lines.append(current)
-            current = word
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
+        if current and len(candidate) > max_chars: lines.append(current); current = word
+        else: current = candidate
+    if current: lines.append(current)
     return "\n".join(lines[:6])
 
 
 def render_short(source: Path, output: Path, quote: str, duration: int, template: str, music_enabled: bool, watermark_enabled: bool = True) -> Path:
-    safe = re.sub(r"[^\w\u0080-\uFFFF .,!?;:'’()\-]", "", quote).strip()[:220]
-    safe = _wrap_quote(safe)
+    safe = _wrap_quote(re.sub(r"[^\w\u0080-\uFFFF .,!?;:'’()\-]", "", quote).strip()[:220])
     escaped = safe.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'")
     template_text = template.upper().replace("'", "")[:24]
-    footer_text = "🌙 HAYIRLI CUMALAR 🤲" if template == "Hayırlı Cumalar" else "AIVIDEO • İSLAMİ SHORTS"
+    footer_text = "🌙 HAYIRLI CUMALAR 🤲" if template == "Hayırlı Cumalar" else "MANA • İSLAMİ SHORTS"
     font = "/Windows/Fonts/arial.ttf" if os.name == "nt" else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     draw = f"drawtext=fontfile='{font}':text='{escaped}':fontcolor=white:fontsize=66:x=(w-text_w)/2:y=(h-text_h)/2:line_spacing=16:box=1:boxcolor=black@0.38:boxborderw=42:alpha='if(lt(t,0.7),t/0.7,if(gt(t,{duration}-0.7),({duration}-t)/0.7,1))'"
     header = f"drawtext=fontfile='{font}':text='{template_text}':fontcolor=white@0.72:fontsize=30:x=(w-text_w)/2:y=90"
     footer = f"drawtext=fontfile='{font}':text='{footer_text}':fontcolor=white:fontsize=34:x=(w-text_w)/2:y=h-150:box=1:boxcolor=black@0.30:boxborderw=18"
     base_vf = f"{draw},{header},{footer}"
-
     inputs = ["-i", str(source)]
     use_watermark = watermark_enabled and WATERMARK_FILE.exists()
+    watermark_index = -1
     if use_watermark:
         inputs += ["-loop", "1", "-i", str(WATERMARK_FILE)]
-        opacity = max(0.0, min(1.0, WATERMARK_OPACITY))
-        width = max(80, min(500, WATERMARK_WIDTH))
+        watermark_index = 1
+        opacity = max(0.0, min(1.0, WATERMARK_OPACITY)); width = max(80, min(500, WATERMARK_WIDTH))
         video_filter = f"[0:v]{base_vf}[base];[1:v]scale={width}:-1,format=rgba,colorchannelmixer=aa={opacity:.3f}[wm];[base][wm]overlay=x=W-w-55:y=H-h-205:format=auto[vout]"
-        watermark_input_index = 1
-    else:
-        video_filter = f"[0:v]{base_vf}[vout]"
-        watermark_input_index = -1
-
+    else: video_filter = f"[0:v]{base_vf}[vout]"
     if music_enabled and MUSIC_FILE.exists():
-        music_index = watermark_input_index + 1 if use_watermark else 1
+        music_index = watermark_index + 1 if use_watermark else 1
         inputs += ["-stream_loop", "-1", "-i", str(MUSIC_FILE)]
         audio_args = ["-map", f"{music_index}:a:0", "-c:a", "aac", "-b:a", "128k", "-af", "volume=0.20", "-shortest"]
-    else:
-        audio_args = ["-an"]
-
+    else: audio_args = ["-an"]
     command = [_ffmpeg(), "-y", *inputs, "-t", str(duration), "-filter_complex", video_filter, "-map", "[vout]", "-c:v", "libx264", "-preset", "veryfast", "-crf", "19", "-pix_fmt", "yuv420p", *audio_args, "-movflags", "+faststart", str(output)]
-    subprocess.run(command, check=True, capture_output=True, text=True)
+    _run_ffmpeg(command, timeout=max(FFMPEG_MIN_TIMEOUT, duration * 6 + 120), context="shorts final render")
     return output
 
 
 def generate_video(topic: str, template: str, duration: int, music_enabled: bool = True, watermark_enabled: bool = True) -> dict:
+    job_id = uuid.uuid4().hex[:12]
+    job_dir = OUTPUT_DIR / "jobs" / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
     script = ollama_generate(topic, template, duration)
     queries = script["visual_queries"]
     scene_count = min(len(queries), max(3, duration // 10))
     selected_queries = queries[:scene_count]
     scene_seconds = duration / scene_count
-    normalized_clips: list[Path] = []
-    used_queries: list[str] = []
+    normalized_clips = []; used_queries = []
     for index, query in enumerate(selected_queries, start=1):
-        raw = OUTPUT_DIR / f"scene_{index}.mp4"
-        normalized = OUTPUT_DIR / f"scene_{index}_1080.mp4"
-        pexels_video(query, raw)
-        _normalize_clip(raw, normalized, scene_seconds)
-        normalized_clips.append(normalized)
-        used_queries.append(_safe_query(query))
-    montage = OUTPUT_DIR / "montage.mp4"
-    _concat_clips(normalized_clips, montage)
-    output = OUTPUT_DIR / "aivideo_short.mp4"
+        raw = job_dir / f"scene_{index}.mp4"; normalized = job_dir / f"scene_{index}_1080.mp4"
+        pexels_video(query, raw); _normalize_clip(raw, normalized, scene_seconds)
+        normalized_clips.append(normalized); used_queries.append(_safe_query(query))
+    montage = job_dir / "montage.mp4"; _concat_clips(normalized_clips, montage)
+    output = job_dir / "aivideo_short.mp4"
     render_short(montage, output, script.get("quote", "Hayra vesile olan bir söz."), duration, template, music_enabled, watermark_enabled)
-    return {"ok": True, "video_path": str(output), "script": script, "scenes": used_queries, "music_enabled": bool(music_enabled and MUSIC_FILE.exists()), "watermark_enabled": bool(watermark_enabled and WATERMARK_FILE.exists()), "engine": "ollama+pexels+ffmpeg-multiscene-watermark"}
+    latest = OUTPUT_DIR / "aivideo_short.mp4"
+    try: shutil.copyfile(output, latest)
+    except OSError: pass
+    return {"ok": True, "job_id": job_id, "video_path": str(output), "script": script, "scenes": used_queries, "music_enabled": bool(music_enabled and MUSIC_FILE.exists()), "watermark_enabled": bool(watermark_enabled and WATERMARK_FILE.exists()), "engine": "ollama+pexels+ffmpeg-multiscene-watermark"}
