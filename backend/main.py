@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import traceback
 from pathlib import Path
 from threading import Thread
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+
+ENGINE_DIR = Path(__file__).resolve().parent
+load_dotenv(ENGINE_DIR / ".env")
 
 from engine import generate_video
 from story_engine import generate_story_video
 from youtube_uploader import authenticate, upload_video, youtube_status
 
-app = FastAPI(title="Aivideo Local Engine", version="0.6.1")
+app = FastAPI(title="Aivideo Local Engine", version="0.6.2")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 oauth_running = False
 oauth_error: str | None = None
@@ -23,14 +28,14 @@ def _oauth_worker() -> None:
     global oauth_running, oauth_error
     try:
         authenticate(); oauth_error = None
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         oauth_error = str(exc)
     finally:
         oauth_running = False
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True, "service": "aivideo-local-engine", "version": "0.6.1"}
+    return {"ok": True, "service": "aivideo-local-engine", "version": "0.6.2"}
 
 @app.get("/engines")
 def engines() -> dict:
@@ -75,7 +80,7 @@ async def generate_and_upload(topic: str = Form(""), template: str = Form("Hayı
         if not youtube_enabled: return result
         status = await asyncio.to_thread(youtube_status)
         if not status.get("connected"): return {**result, "youtube": {"uploaded": False, "reason": "YouTube hesabı bağlı değil."}}
-        script = result.get("script", {}); final_title = (title.strip() or script.get("title") or "Aivideo")[:100]; final_description = description.strip() or script.get("description", "")
+        script = result.get("script", {}); final_title = (title.strip() or script.get("title") or "Mana")[:100]; final_description = description.strip() or script.get("description", "")
         generated_tags = script.get("tags", []); generated_tags = [x.strip() for x in generated_tags.split(",") if x.strip()] if isinstance(generated_tags, str) else generated_tags
         final_tags = [x.strip() for x in tags.split(",") if x.strip()] or generated_tags
         uploaded = await asyncio.to_thread(upload_video, result["video_path"], final_title, final_description, final_tags, privacy_status)
@@ -97,7 +102,7 @@ def latest_story_video() -> FileResponse:
     return FileResponse(path, media_type="video/mp4", filename="aivideo_story.mp4")
 
 @app.post("/youtube/upload")
-async def youtube_upload(video: UploadFile = File(...), title: str = Form("Aivideo"), description: str = Form(""), tags: str = Form(""), privacy_status: str = Form("private")) -> dict:
+async def youtube_upload(video: UploadFile = File(...), title: str = Form("Mana"), description: str = Form(""), tags: str = Form(""), privacy_status: str = Form("private")) -> dict:
     try: status = youtube_status()
     except Exception as exc: raise HTTPException(status_code=500, detail=str(exc)) from exc
     if not status.get("connected"): raise HTTPException(status_code=401, detail="YouTube hesabı bağlı değil. Önce /youtube/auth çalıştır.")
