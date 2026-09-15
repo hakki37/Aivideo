@@ -7,3 +7,5 @@ google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.2
 google-auth==2.40.3
 pyttsx3==2.99
+pywin32
+comtypes
